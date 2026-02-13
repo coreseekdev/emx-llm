@@ -194,16 +194,39 @@ async fn main() -> Result<()> {
             if dry_run {
                 // Output constructed messages without sending
                 println!("=== Dry Run Mode ====");
-                println!("System Prompts:");
-                for (i, msg) in messages.iter().enumerate() {
-                    match msg.role {
-                        MessageRole::System => println!("  [System {}]: {}", i + 1, msg.content),
-                        MessageRole::User => println!("  [User {}]: {}", i + 1, msg.content),
-                        _ => {}
+                println!("Model: {}", model_id);
+                println!();
+
+                // Separate system messages from conversation (Anthropic-style)
+                let (system_msgs, conversation): (Vec<_>, Vec<_>) = messages
+                    .iter()
+                    .partition(|m| m.role == MessageRole::System);
+
+                // Show system prompt(s)
+                if system_msgs.is_empty() {
+                    println!("System: (none)");
+                } else if system_msgs.len() == 1 {
+                    println!("System: {}", system_msgs[0].content);
+                } else {
+                    println!("System (combined):");
+                    for msg in &system_msgs {
+                        println!("---");
+                        println!("{}", msg.content);
                     }
                 }
                 println!();
-                println!("Total messages: {}", messages.len());
+
+                // Show conversation messages
+                println!("Messages:");
+                for msg in &conversation {
+                    match msg.role {
+                        MessageRole::User => println!("  [User]: {}", msg.content),
+                        MessageRole::Assistant => println!("  [Assistant]: {}", msg.content),
+                        MessageRole::System => {} // Already shown above
+                    }
+                }
+                println!();
+                println!("Total: {} system + {} conversation messages", system_msgs.len(), conversation.len());
                 return Ok(());
             }
 

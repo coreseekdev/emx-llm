@@ -504,25 +504,44 @@ impl ModelReference {
         // Case-insensitive: convert to lowercase for internal processing
         let input_lower = trimmed.to_lowercase();
 
-        let parts: Vec<&str> = input_lower.split('.').collect();
+        // Check if input starts with a known provider prefix
+        let (provider_type, full_path) = if input_lower.starts_with("anthropic.") {
+            (Some("anthropic".to_string()), input_lower.clone())
+        } else if input_lower.starts_with("openai.") {
+            (Some("openai".to_string()), input_lower.clone())
+        } else {
+            (None, input_lower.clone())
+        };
 
-        let (provider_type, model_name) = match parts.as_slice() {
-            [model] => (None, model.to_string()),
-            [provider, model] => {
-                // Check if first part is a known provider
-                match *provider {
-                    "openai" | "anthropic" => (Some(provider.to_string()), model.to_string()),
-                    _ => (None, trimmed.to_string()), // Treat as single model name
+        // Extract model name: the last segment after the last dot (or the whole string)
+        // But for hierarchical paths like "anthropic.glm.glm-4.7", we need to find the model
+        // The model name is the last part of the path
+        let model_name = if let Some(provider) = &provider_type {
+            // Strip provider prefix and get the rest
+            let rest = input_lower.strip_prefix(&format!("{}.", provider)).unwrap_or(&input_lower);
+            // The model name is the last component, but we need to handle dots in model names
+            // e.g., "glm.glm-4.7" -> model_name = "glm-4.7"
+            // Split by "." but the last two parts might be "glm-4" and "7" which should be "glm-4.7"
+            let parts: Vec<&str> = rest.split('.').collect();
+            if parts.len() >= 2 {
+                // Check if the last part looks like a version number (e.g., "7" from "glm-4.7")
+                // If so, combine the last two parts
+                let last = parts.last().unwrap();
+                let second_last = parts[parts.len() - 2];
+                if last.parse::<u32>().is_ok() && second_last.contains('-') {
+                    format!("{}.{}", second_last, last)
+                } else {
+                    last.to_string()
                 }
+            } else {
+                rest.to_string()
             }
-            [provider, _, .., model] if matches!(*provider, "openai" | "anthropic") => {
-                (Some(provider.to_string()), model.to_string())
-            }
-            _ => (None, trimmed.to_string()),
+        } else {
+            input_lower.clone()
         };
 
         Ok(ModelReference {
-            full_path: input_lower,
+            full_path,
             provider_type,
             model_name,
         })
