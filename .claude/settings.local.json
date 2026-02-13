@@ -4,7 +4,15 @@
       "Bash(git config:*)",
       "Bash(git init:*)",
       "Bash(git branch:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(cargo build:*)",
+      "Bash(./target/release/emx-llm.exe:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo doc:*)",
+      "Bash(cargo tree:*)",
+      "Bash(ls:*)",
+      "Bash(echo:*)",
+      "Bash(git push)"
     ]
   }
 }

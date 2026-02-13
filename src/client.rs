@@ -7,15 +7,22 @@ use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use std::time::Duration;
 
-/// Default HTTP request timeout
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+/// Maximum retry attempts for rate-limited requests (HTTP 429)
+const MAX_RETRIES: u32 = 3;
 
-/// Build an HTTP client with sensible defaults (timeout, connection timeout)
-fn build_http_client() -> std::result::Result<HttpClient, reqwest::Error> {
+/// Build an HTTP client with specified timeout
+fn build_http_client(timeout: Duration) -> std::result::Result<HttpClient, reqwest::Error> {
     HttpClient::builder()
-        .timeout(DEFAULT_TIMEOUT)
+        .timeout(timeout)
         .connect_timeout(Duration::from_secs(10))
         .build()
+}
+
+/// Calculate delay for retry attempt using exponential backoff with jitter
+fn retry_delay(attempt: u32) -> Duration {
+    // Exponential backoff: 1s, 2s, 4s
+    let base_secs = 1u64 << attempt.min(4); // Cap at 16s base
+    Duration::from_secs(base_secs)
 }
 
 // ---------------------------------------------------------------------------
@@ -131,8 +138,9 @@ pub struct OpenAIClient {
 impl OpenAIClient {
     /// Create a new OpenAI client
     pub fn new(config: ProviderConfig) -> Result<Self> {
+        let timeout = config.timeout();
         Ok(OpenAIClient {
-            http_client: build_http_client()?,
+            http_client: build_http_client(timeout)?,
             config,
         })
     }
@@ -152,37 +160,55 @@ impl Client for OpenAIClient {
             stream: false,
         };
 
-        let response = self
-            .http_client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .json(&request)
-            .send()
-            .await?;
+        // Retry loop for rate limiting (HTTP 429)
+        let mut attempt = 0;
+        loop {
+            let response = self
+                .http_client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", self.config.api_key))
+                .json(&request)
+                .send()
+                .await?;
 
-        let status = response.status();
-        let body = response.text().await?;
+            let status = response.status();
 
-        if !status.is_success() {
-            return Err(Error::Api(format!(
-                "OpenAI API error ({}): {}",
-                status, body
-            )));
+            // Handle rate limiting with retry
+            if status.as_u16() == 429 && attempt < MAX_RETRIES {
+                attempt += 1;
+                let delay = retry_delay(attempt);
+                tracing::warn!(
+                    "Rate limited (429), retrying in {:?} (attempt {}/{})",
+                    delay, attempt, MAX_RETRIES
+                );
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+
+            let body = response.text().await?;
+
+            if !status.is_success() {
+                return Err(Error::Api(format!(
+                    "OpenAI API error ({}): {}",
+                    status, body
+                )));
+            }
+
+            let response: ChatResponse = serde_json::from_str(&body)
+                .map_err(|e| Error::Api(format!("Failed to parse OpenAI response: {}. Body: {}", e, body)))?;
+            let message = response
+                .choices
+                .first()
+                .ok_or_else(|| Error::Api("No choices in OpenAI response".to_string()))?;
+
+            let usage = Usage {
+                prompt_tokens: response.usage.prompt_tokens,
+                completion_tokens: response.usage.completion_tokens,
+                total_tokens: response.usage.total_tokens,
+            };
+
+            return Ok((message.message.content.clone(), usage));
         }
-
-        let response: ChatResponse = serde_json::from_str(&body)?;
-        let message = response
-            .choices
-            .first()
-            .ok_or_else(|| Error::Api("No choices in response".to_string()))?;
-
-        let usage = Usage {
-            prompt_tokens: response.usage.prompt_tokens,
-            completion_tokens: response.usage.completion_tokens,
-            total_tokens: response.usage.total_tokens,
-        };
-
-        Ok((message.message.content.clone(), usage))
     }
 
     fn chat_stream(
@@ -287,8 +313,9 @@ pub struct AnthropicClient {
 impl AnthropicClient {
     /// Create a new Anthropic client
     pub fn new(config: ProviderConfig) -> Result<Self> {
+        let timeout = config.timeout();
         Ok(AnthropicClient {
-            http_client: build_http_client()?,
+            http_client: build_http_client(timeout)?,
             config,
         })
     }
@@ -315,40 +342,58 @@ impl Client for AnthropicClient {
             stream: None, // No streaming for regular chat
         };
 
-        let response = self
-            .http_client
-            .post(&url)
-            .header("x-api-key", self.config.api_key.clone())
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&request)
-            .send()
-            .await?;
+        // Retry loop for rate limiting (HTTP 429)
+        let mut attempt = 0;
+        loop {
+            let response = self
+                .http_client
+                .post(&url)
+                .header("x-api-key", self.config.api_key.clone())
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&request)
+                .send()
+                .await?;
 
-        let status = response.status();
-        let body = response.text().await?;
+            let status = response.status();
 
-        if !status.is_success() {
-            return Err(Error::Api(format!(
-                "Anthropic API error ({}): {}",
-                status, body
-            )));
+            // Handle rate limiting with retry
+            if status.as_u16() == 429 && attempt < MAX_RETRIES {
+                attempt += 1;
+                let delay = retry_delay(attempt);
+                tracing::warn!(
+                    "Rate limited (429), retrying in {:?} (attempt {}/{})",
+                    delay, attempt, MAX_RETRIES
+                );
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+
+            let body = response.text().await?;
+
+            if !status.is_success() {
+                return Err(Error::Api(format!(
+                    "Anthropic API error ({}): {}",
+                    status, body
+                )));
+            }
+
+            let response: AnthropicMessageResponse = serde_json::from_str(&body)
+                .map_err(|e| Error::Api(format!("Failed to parse Anthropic response: {}. Body: {}", e, body)))?;
+            let usage = Usage {
+                prompt_tokens: response.usage.input_tokens,
+                completion_tokens: response.usage.output_tokens,
+                total_tokens: response.usage.input_tokens + response.usage.output_tokens,
+            };
+
+            let text = response
+                .content
+                .first()
+                .map(|block| block.text.clone())
+                .ok_or_else(|| Error::Api("Anthropic response contained no content blocks".to_string()))?;
+
+            return Ok((text, usage));
         }
-
-        let response: AnthropicMessageResponse = serde_json::from_str(&body)?;
-        let usage = Usage {
-            prompt_tokens: response.usage.input_tokens,
-            completion_tokens: response.usage.output_tokens,
-            total_tokens: response.usage.input_tokens + response.usage.output_tokens,
-        };
-
-        let text = response
-            .content
-            .first()
-            .map(|block| block.text.clone())
-            .ok_or_else(|| Error::Api("Anthropic response contained no content blocks".to_string()))?;
-
-        Ok((text, usage))
     }
 
     fn chat_stream(

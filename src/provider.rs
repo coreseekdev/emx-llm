@@ -44,6 +44,7 @@ pub fn create_client_for_model(model_ref: &str) -> anyhow::Result<(Box<dyn Clien
         api_key: model_config.api_key,
         model: Some(model_id.clone()),
         max_tokens: model_config.max_tokens,
+        timeout_secs: None, // Use default timeout
     };
 
     let client = create_client(provider_config)?;
@@ -62,6 +63,7 @@ mod tests {
             api_key: "test-key".to_string(),
             model: None,
             max_tokens: None,
+            timeout_secs: None,
         };
         let client = create_client(config);
         assert!(client.is_ok());
@@ -75,6 +77,7 @@ mod tests {
             api_key: "test-key".to_string(),
             model: None,
             max_tokens: None,
+            timeout_secs: None,
         };
         let client = create_client(config);
         assert!(client.is_ok());

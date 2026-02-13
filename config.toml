@@ -1,0 +1,17 @@
+# EMX-LLM Configuration for GLM models
+# Section names use "-" instead of "." to avoid TOML parsing issues
+# The "model" field specifies the actual API model name
+
+[llm.provider]
+type = "anthropic"
+
+[llm.provider.anthropic.glm]
+api_base = "https://open.bigmodel.cn/api/anthropic"
+api_key = "eb7952fb86c7452db27b6b96291f3a92.TyCeu9AGOD0hNid5"
+max_tokens = 4096
+
+[llm.provider.anthropic.glm.glm-5]
+model = "glm-5"
+
+[llm.provider.anthropic.glm.glm-4-7]
+model = "glm-4.7"

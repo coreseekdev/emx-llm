@@ -39,7 +39,8 @@ impl TxtarArchive {
                     name,
                     content: String::new(),
                 });
-                current_file = Some(files.last_mut().unwrap());
+                // Safe: we just pushed to files, so last_mut() will return Some
+                current_file = files.last_mut();
             } else if let Some(ref mut file) = current_file {
                 file.content.push_str(line);
                 file.content.push('\n');
@@ -127,9 +128,8 @@ async fn main() -> Result<()> {
             query,
         } => {
             // Determine provider and model from hierarchical lookup
-            let (client, model_id) = if model.is_some() {
+            let (client, model_id) = if let Some(model_ref) = &model {
                 // Use hierarchical configuration lookup
-                let model_ref = model.as_ref().unwrap();
                 match create_client_for_model(model_ref) {
                     Ok(result) => result,
                     Err(e) => {
