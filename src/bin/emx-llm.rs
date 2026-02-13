@@ -213,7 +213,9 @@ async fn main() -> Result<()> {
             if dry_run {
                 // Output constructed messages without sending
                 println!("=== Dry Run Mode ====");
+                println!("API Base: {}", client.api_base());
                 println!("Model: {}", model_id);
+                println!("Max Tokens: {}", client.max_tokens());
                 println!();
 
                 // Separate system messages from conversation (Anthropic-style)
@@ -221,12 +223,10 @@ async fn main() -> Result<()> {
                     .iter()
                     .partition(|m| m.role == MessageRole::System);
 
-                // Show system prompt(s)
-                if use_default_system {
-                    println!("System (default): {}", system_msgs.first().map(|m| m.content.as_str()).unwrap_or(""));
-                } else if system_msgs.len() == 1 {
+                // Show system prompt(s) - no distinction between default and user-provided
+                if system_msgs.len() == 1 {
                     println!("System: {}", system_msgs[0].content);
-                } else {
+                } else if !system_msgs.is_empty() {
                     println!("System (combined):");
                     for msg in &system_msgs {
                         println!("---");

@@ -239,13 +239,110 @@ impl ProviderConfig {
             .with_defaults(defaults)
             .build()?;
 
-        // Resolve the model configuration hierarchically
-        let model_config = Self::resolve_model_config(&config, &parsed, &[])
-            .ok_or_else(|| anyhow::anyhow!("Model configuration not found for: {}", model_ref))?;
+        // If full path provided (has provider prefix), resolve directly
+        if parsed.provider_type.is_some() {
+            let model_config = Self::resolve_model_config(&config, &parsed, &[])
+                .ok_or_else(|| anyhow::anyhow!("Model configuration not found for: {}", model_ref))?;
+            let model_id = model_config.model.clone().unwrap_or_else(|| parsed.model_name.clone());
+            return Ok((model_config, model_id));
+        }
 
-        let model_id = model_config.model.clone().unwrap_or_else(|| parsed.model_name.clone());
+        // Short name: search for matching sections in config
+        let matches = Self::find_sections_by_key(&config, &parsed.model_name);
 
-        Ok((model_config, model_id))
+        match matches.len() {
+            0 => Err(anyhow::anyhow!("Model configuration not found for: {}", model_ref)),
+            1 => {
+                // Unique match - use it
+                let full_ref = ModelReference {
+                    full_path: matches[0].clone(),
+                    provider_type: Some(matches[0].split('.').next().unwrap_or("anthropic").to_string()),
+                    model_name: parsed.model_name.clone(),
+                };
+                let model_config = Self::resolve_model_config(&config, &full_ref, &[])
+                    .ok_or_else(|| anyhow::anyhow!("Model configuration not found for: {}", model_ref))?;
+                let model_id = model_config.model.clone().unwrap_or_else(|| parsed.model_name.clone());
+                Ok((model_config, model_id))
+            }
+            _ => {
+                // Multiple matches - report ambiguity
+                let match_list: Vec<String> = matches.iter()
+                    .map(|p| format!("  - {}", p))
+                    .collect();
+                Err(anyhow::anyhow!(
+                    "Ambiguous model reference '{}'. Found {} matching sections:\n{}",
+                    model_ref,
+                    matches.len(),
+                    match_list.join("\n")
+                ))
+            }
+        }
+    }
+
+    /// Find all sections under llm.provider that end with the given key
+    /// Returns list of full paths (e.g., ["anthropic.glm.glm-5", "openai.models.glm-5"])
+    fn find_sections_by_key(_config: &emx_config_core::Config, key: &str) -> Vec<String> {
+        let mut matches = Vec::new();
+
+        // Load and parse config files directly for iteration
+        // Try local config.toml first, then ~/.emx/config.toml
+        let home_config = dirs::home_dir()
+            .map(|p| format!("{}/.emx/config.toml", p.display()))
+            .unwrap_or_default();
+
+        let config_sources: Vec<&str> = vec![
+            "./config.toml",
+            &home_config,
+        ];
+
+        for source in config_sources {
+            if let Ok(content) = std::fs::read_to_string(source) {
+                if let Ok(toml_value) = content.parse::<toml::Value>() {
+                    Self::search_toml_sections(&toml_value, &["llm", "provider"], key, &mut matches);
+                }
+            }
+        }
+
+        matches
+    }
+
+    /// Recursively search TOML structure for sections ending with target_key
+    fn search_toml_sections(
+        toml_value: &toml::Value,
+        current_path: &[&str],
+        target_key: &str,
+        matches: &mut Vec<String>,
+    ) {
+        // Navigate to current path
+        let mut current = Some(toml_value);
+        for part in current_path {
+            current = current.and_then(|v| v.get(part));
+        }
+
+        let Some(table) = current.and_then(|v| v.as_table()) else {
+            return;
+        };
+
+        // Check each key in this table
+        for (key, value) in table {
+            let new_path: Vec<&str> = current_path.iter().cloned().chain(std::iter::once(key.as_str())).collect();
+
+            // If this key matches target and has a "model" field, it's a model section
+            if key == target_key {
+                if let Some(sub_table) = value.as_table() {
+                    if sub_table.contains_key("model") {
+                        // Build relative path from "llm.provider"
+                        let relative_path = new_path[2..].join(".");
+                        matches.push(relative_path);
+                    }
+                }
+            }
+
+            // Recurse into sub-tables (but not into the target_key itself to avoid infinite loop)
+            if key != target_key && value.is_table() {
+                Self::search_toml_sections(toml_value, &new_path, target_key, matches);
+            }
+        }
     }
 
     /// Resolve model configuration using hierarchical key lookup
@@ -263,13 +360,13 @@ impl ProviderConfig {
     fn resolve_model_config(
         config: &emx_config_core::Config,
         model_ref: &ModelReference,
-        path_prefix: &[String],
+        _path_prefix: &[String],
     ) -> Option<ModelConfig> {
-        // Build the search path for this model
-        let mut search_path = path_prefix.to_vec();
-        search_path.push(model_ref.model_name.clone());
+        // Get path segments from full_path first
+        let path_parts: Vec<String> = model_ref.full_path.split('.').map(|s| s.to_string()).collect();
 
-        let provider_type = if let Some(pt) = &model_ref.provider_type {
+        // Determine provider type from explicit reference
+        let explicit_provider_type = if let Some(pt) = &model_ref.provider_type {
             match pt.to_lowercase().as_str() {
                 "openai" => Some(ProviderType::OpenAI),
                 "anthropic" => Some(ProviderType::Anthropic),
@@ -279,51 +376,33 @@ impl ProviderConfig {
             None
         };
 
-        // Determine the provider type - from explicit reference, config, or default
-        let provider_type = provider_type.or_else(|| {
-            // Try to get from config at this level
-            let key = build_key(&search_path, "type");
-            config.get_string(&key).ok().and_then(|s| {
-                match s.to_lowercase().as_str() {
-                    "openai" => Some(ProviderType::OpenAI),
-                    "anthropic" => Some(ProviderType::Anthropic),
-                    _ => None,
-                }
-            })
-        });
+        // Try paths in order of specificity:
+        // 1. Full path (e.g., ["anthropic", "glm", "glm-4-7"])
+        // 2. Progressively shorter paths (e.g., ["anthropic", "glm"], ["anthropic"])
+        // 3. Just model name (e.g., ["glm-4-7"])
 
-        // Try to resolve at current path
-        if let Some(resolved) = Self::try_resolve_at_level(config, &search_path, provider_type) {
-            return Some(resolved);
-        }
-
-        // If we have more levels in the path, try going up
-        if let Some(_prefix) = path_prefix.last() {
-            let mut parent_path = path_prefix[..path_prefix.len() - 1].to_vec();
-            // Include the intermediate section name (like "glm" from "anthropic.glm.glm-5")
-            let parts: Vec<&str> = model_ref.full_path.split('.').collect();
-            if parts.len() > 1 {
-                parent_path.push(parts[parts.len() - 2].to_string());
-            }
-            return Self::resolve_model_config(config, model_ref, &parent_path);
-        }
-
-        // Try with the intermediate sections if we have a full path
-        if model_ref.full_path.contains('.') {
-            let parts: Vec<String> = model_ref
-                .full_path
-                .split('.')
-                .map(|s| s.to_string())
-                .collect();
-
-            // Build path progressively through all sections
-            for i in (0..parts.len() - 1).rev() {
-                let section_path = &parts[..=i];
-                let search_path = section_path.to_vec();
-                if let Some(resolved) = Self::try_resolve_at_level(config, &search_path, provider_type) {
+        // Try full path first if we have multiple segments
+        if path_parts.len() > 1 {
+            if let Some(resolved) = Self::try_resolve_at_level(config, &path_parts, explicit_provider_type) {
+                // Only accept if model field is set at this level
+                if resolved.model.is_some() {
                     return Some(resolved);
                 }
             }
+
+            // Try progressively shorter paths
+            for i in (0..path_parts.len() - 1).rev() {
+                let search_path = path_parts[..=i].to_vec();
+                if let Some(resolved) = Self::try_resolve_at_level(config, &search_path, explicit_provider_type) {
+                    return Some(resolved);
+                }
+            }
+        }
+
+        // Try with just model name
+        let search_path = vec![model_ref.model_name.clone()];
+        if let Some(resolved) = Self::try_resolve_at_level(config, &search_path, explicit_provider_type) {
+            return Some(resolved);
         }
 
         None
@@ -513,32 +592,8 @@ impl ModelReference {
             (None, input_lower.clone())
         };
 
-        // Extract model name: the last segment after the last dot (or the whole string)
-        // But for hierarchical paths like "anthropic.glm.glm-4.7", we need to find the model
-        // The model name is the last part of the path
-        let model_name = if let Some(provider) = &provider_type {
-            // Strip provider prefix and get the rest
-            let rest = input_lower.strip_prefix(&format!("{}.", provider)).unwrap_or(&input_lower);
-            // The model name is the last component, but we need to handle dots in model names
-            // e.g., "glm.glm-4.7" -> model_name = "glm-4.7"
-            // Split by "." but the last two parts might be "glm-4" and "7" which should be "glm-4.7"
-            let parts: Vec<&str> = rest.split('.').collect();
-            if parts.len() >= 2 {
-                // Check if the last part looks like a version number (e.g., "7" from "glm-4.7")
-                // If so, combine the last two parts
-                let last = parts.last().unwrap();
-                let second_last = parts[parts.len() - 2];
-                if last.parse::<u32>().is_ok() && second_last.contains('-') {
-                    format!("{}.{}", second_last, last)
-                } else {
-                    last.to_string()
-                }
-            } else {
-                rest.to_string()
-            }
-        } else {
-            input_lower.clone()
-        };
+        // Model name is the last segment after "."
+        let model_name = full_path.split('.').last().unwrap_or(&full_path).to_string();
 
         Ok(ModelReference {
             full_path,
@@ -546,16 +601,6 @@ impl ModelReference {
             model_name,
         })
     }
-}
-
-/// Build a configuration key from path components and a final key
-fn build_key(path: &[String], key: &str) -> String {
-    let mut parts = vec!["llm", "provider"];
-    for part in path {
-        parts.push(part);
-    }
-    parts.push(key);
-    parts.join(".")
 }
 
 #[cfg(test)]

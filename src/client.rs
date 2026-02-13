@@ -114,6 +114,12 @@ pub trait Client: Send + Sync {
         messages: &[Message],
         model: &str,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
+
+    /// Get the API base URL
+    fn api_base(&self) -> &str;
+
+    /// Get the max tokens setting
+    fn max_tokens(&self) -> u32;
 }
 
 /// OpenAI client implementation
@@ -261,6 +267,14 @@ impl Client for OpenAIClient {
                 }
             }
         })
+    }
+
+    fn api_base(&self) -> &str {
+        &self.config.api_base
+    }
+
+    fn max_tokens(&self) -> u32 {
+        self.config.max_tokens()
     }
 }
 
@@ -438,6 +452,14 @@ impl Client for AnthropicClient {
 
             tracing::warn!("SSE stream ended unexpectedly");
         })
+    }
+
+    fn api_base(&self) -> &str {
+        &self.config.api_base
+    }
+
+    fn max_tokens(&self) -> u32 {
+        self.config.max_tokens()
     }
 }
 
