@@ -1,0 +1,38 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Build artifacts
+/debug/
+/release/
+
+# Test coverage
+*.profraw
+*.profdata
+
+# Environment
+.env
+.env.local
+*.key
+
+# Fixtures (if they contain sensitive data)
+# tests/fixtures/*.json
+
+# Log files
+*.log
+
+# Temporary files
+.tmp/
+temp/

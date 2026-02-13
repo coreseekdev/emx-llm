@@ -1,0 +1,48 @@
+[package]
+name = "emx-llm"
+version = "0.1.0"
+edition = "2021"
+authors = ["nzinfo <li.monan@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/coreseekdev/emx-llm"
+description = "LLM client library for EMX with OpenAI and Anthropic support"
+
+[[bin]]
+name = "emx-llm"
+path = "src/bin/emx-llm.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+async-stream = "0.3"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+toml = "0.8"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# CLI (only for binary)
+clap = { version = "4.4", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Configuration
+emx-config-core = { git = "https://github.com/coreseekdev/emx-config", version = "0.1.0" }
+
+[dev-dependencies]
+# HTTP mocking for testing
+wiremock = "0.6"
+# Txtar fixture format (same workspace)
+emx-txtar = { path = "../emx-txtar" }
