@@ -45,4 +45,4 @@ emx-config-core = { git = "https://github.com/coreseekdev/emx-config", version =
 # HTTP mocking for testing
 wiremock = "0.6"
 # Txtar fixture format (same workspace)
-emx-txtar = { path = "../emx-txtar" }
+emx-txtar = { git = "https://github.com/coreseekdev/emx-txtar" }
