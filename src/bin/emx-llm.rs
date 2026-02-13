@@ -6,6 +6,9 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use tracing::info;
 
+/// Default system prompt used when no explicit system prompt is provided
+const DEFAULT_SYSTEM_PROMPT: &str = "You are a helpful, harmless, and honest AI assistant.";
+
 /// Simple txtar archive for parsing stdin
 struct TxtarEntry {
     name: String,
@@ -145,12 +148,13 @@ async fn main() -> Result<()> {
 
             // Build messages from prompts and query
             let mut messages = Vec::new();
+
+            // Collect explicit system prompts
+            let mut explicit_system_prompts = Vec::new();
+
             for prompt_file in &prompts {
                 if let Ok(content) = std::fs::read_to_string(prompt_file) {
-                    messages.push(Message {
-                        role: MessageRole::System,
-                        content: content.into(),
-                    });
+                    explicit_system_prompts.push(content);
                 }
             }
 
@@ -179,10 +183,25 @@ async fn main() -> Result<()> {
 
             // Add attachments as context messages
             for attachment in &attachments {
+                explicit_system_prompts.push(attachment.clone());
+            }
+
+            // Determine if we should use default system prompt
+            let use_default_system = explicit_system_prompts.is_empty();
+
+            // Add system messages
+            if use_default_system {
                 messages.push(Message {
                     role: MessageRole::System,
-                    content: attachment.clone(),
+                    content: DEFAULT_SYSTEM_PROMPT.to_string(),
                 });
+            } else {
+                for prompt in &explicit_system_prompts {
+                    messages.push(Message {
+                        role: MessageRole::System,
+                        content: prompt.clone(),
+                    });
+                }
             }
 
             // Add the user query
@@ -203,8 +222,8 @@ async fn main() -> Result<()> {
                     .partition(|m| m.role == MessageRole::System);
 
                 // Show system prompt(s)
-                if system_msgs.is_empty() {
-                    println!("System: (none)");
+                if use_default_system {
+                    println!("System (default): {}", system_msgs.first().map(|m| m.content.as_str()).unwrap_or(""));
                 } else if system_msgs.len() == 1 {
                     println!("System: {}", system_msgs[0].content);
                 } else {
