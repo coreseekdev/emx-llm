@@ -24,6 +24,37 @@ fn uuid_simple() -> String {
     format!("{:x}{:x}", duration.as_secs(), duration.subsec_nanos())
 }
 
+/// Create an OpenAI-compatible error response
+fn openai_error(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
+    let error_type = match status {
+        StatusCode::BAD_REQUEST => "invalid_request_error",
+        StatusCode::UNAUTHORIZED => "authentication_error",
+        StatusCode::FORBIDDEN => "permission_error",
+        StatusCode::NOT_FOUND => "invalid_request_error",
+        StatusCode::TOO_MANY_REQUESTS => "rate_limit_error",
+        StatusCode::SERVICE_UNAVAILABLE => "server_error",
+        _ => "server_error",
+    };
+    
+    (status, Json(json!({
+        "error": {
+            "message": message,
+            "type": error_type,
+            "code": status.as_u16()
+        }
+    })))
+}
+
+/// Create an Anthropic-compatible error response
+fn anthropic_error(message: &str) -> (StatusCode, Json<Value>) {
+    (StatusCode::BAD_REQUEST, Json(json!({
+        "error": {
+            "type": "error",
+            "message": message
+        }
+    })))
+}
+
 /// Gateway state shared across handlers
 #[derive(Clone)]
 pub struct GatewayState {
@@ -47,7 +78,7 @@ pub async fn openai_chat_handler(
     let resolved = resolve_model(model, &state.config)
         .map_err(|e| {
             error!("Failed to resolve model '{}': {}", model, e);
-            StatusCode::NOT_FOUND
+            openai_error(StatusCode::NOT_FOUND, &format!("Model '{}' not found: {}", model, e))
         })?;
 
     // Verify it's an OpenAI provider
@@ -56,19 +87,20 @@ pub async fn openai_chat_handler(
             "Model '{}' resolved to non-OpenAI provider: {:?}",
             model, resolved.provider_type
         );
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(openai_error(StatusCode::BAD_REQUEST, 
+            &format!("Model '{}' is not an OpenAI model", model)).1);
     }
 
     // Extract messages from request
     let messages_value = request
         .get("messages")
-        .ok_or(StatusCode::BAD_REQUEST)?;
+        .ok_or(openai_error(StatusCode::BAD_REQUEST, "Missing 'messages' field in request body"))?;
 
     // Convert OpenAI messages to emx-llm Message format
     let messages: Vec<Message> = serde_json::from_value(messages_value.clone())
         .map_err(|e| {
             error!("Failed to parse messages: {}", e);
-            StatusCode::BAD_REQUEST
+            openai_error(StatusCode::BAD_REQUEST, &format!("Invalid messages format: {}", e)).1
         })?;
 
     // Try to create client and call the API
@@ -100,7 +132,7 @@ pub async fn openai_chat_handler(
                 }
                 Err(e) => {
                     error!("API call failed: {}", e);
-                    Err(StatusCode::BAD_GATEWAY)
+                    Err(openai_error(StatusCode::BAD_GATEWAY, &format!("Provider API error: {}", e)).1)
                 }
             }
         }
