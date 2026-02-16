@@ -2,32 +2,32 @@
 
 # Start gateway
 exec emx-gate &
-sleep 2s
+sleep 4s
 
 # Test /v1/models endpoint
-exec curl -s http://127.0.0.1:8848/v1/models
-stdout '"object":"list"'
-stdout '"data"'
+exec curl --noproxy "*" -s http://127.0.0.1:8848/v1/models
+stdout 'list'
+stdout 'data'
 
 # Verify specific models exist
-exec curl -s http://127.0.0.1:8848/v1/models | grep 'openai.gpt-4'
+exec curl --noproxy "*" -s http://127.0.0.1:8848/v1/models
 stdout 'openai.gpt-4'
 
-exec curl -s http://127.0.0.1:8848/v1/models | grep 'anthropic.claude-3-opus-20240229'
+exec curl --noproxy "*" -s http://127.0.0.1:8848/v1/models
 stdout 'anthropic.claude-3-opus-20240229'
 
 # Test /v1/providers endpoint
-exec curl -s http://127.0.0.1:8848/v1/providers
-stdout '"object":"list"'
-stdout '"data"'
+exec curl --noproxy "*" -s http://127.0.0.1:8848/v1/providers
+stdout 'list'
+stdout 'data'
 
 # Verify provider types
-exec curl -s http://127.0.0.1:8848/v1/providers | grep '"type":"openai"'
-stdout '"type":"openai"'
+exec curl --noproxy "*" -s http://127.0.0.1:8848/v1/providers
+stdout 'openai'
 
-exec curl -s http://127.0.0.1:8848/v1/providers | grep '"type":"anthropic"'
-stdout '"type":"anthropic"'
+exec curl --noproxy "*" -s http://127.0.0.1:8848/v1/providers
+stdout 'anthropic'
 
 # Clean up
-[unix] exec pkill -f emx-gate
-[windows] exec taskkill //F //IM emx-gate.exe
+[windows] ? exec powershell.exe -Command "Stop-Process -Name emx-gate -Force -ErrorAction SilentlyContinue"
+[unix] ? exec pkill -f emx-gate

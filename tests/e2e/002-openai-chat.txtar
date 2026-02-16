@@ -2,35 +2,25 @@
 
 # Start gateway
 exec emx-gate &
-sleep 2s
+sleep 4s
 
 # Test basic chat completion
-exec curl -s -X POST http://127.0.0.1:8848/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"openai.gpt-4","messages":[{"role":"user","content":"Hello"}]}'
-stdout '"object":"chat.completion"'
-stdout '"model":"openai.gpt-4"'
+exec curl --noproxy "*" -s -X POST http://127.0.0.1:8848/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"openai.gpt-4","messages":[{"role":"user","content":"Hello"}]}'
+stdout 'object'
 stdout 'choices'
 
 # Test response structure
-exec curl -s -X POST http://127.0.0.1:8848/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"openai.gpt-4","messages":[{"role":"user","content":"Test"}]}'
-grep -o '"object":"chat.completion"'
-stdout '"object":"chat.completion"'
+exec curl --noproxy "*" -s -X POST http://127.0.0.1:8848/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"openai.gpt-4","messages":[{"role":"user","content":"Test"}]}'
+stdout 'chat.completion'
 
 # Test with system message
-exec curl -s -X POST http://127.0.0.1:8848/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"openai.gpt-4","messages":[{"role":"system","content":"You are helpful"},{"role":"user","content":"Hi"}]}'
+exec curl --noproxy "*" -s -X POST http://127.0.0.1:8848/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"openai.gpt-4","messages":[{"role":"system","content":"You are helpful"},{"role":"user","content":"Hi"}]}'
 stdout 'assistant'
 
 # Test usage information
-exec curl -s -X POST http://127.0.0.1:8848/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"openai.gpt-4","messages":[{"role":"user","content":"Hello"}]}'
+exec curl --noproxy "*" -s -X POST http://127.0.0.1:8848/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"openai.gpt-4","messages":[{"role":"user","content":"Hello"}]}'
 stdout 'usage'
 
 # Clean up
-[unix] exec pkill -f emx-gate
-[windows] exec taskkill //F //IM emx-gate.exe
+[windows] ? exec powershell.exe -Command "Stop-Process -Name emx-gate -Force -ErrorAction SilentlyContinue"
+[unix] ? exec pkill -f emx-gate

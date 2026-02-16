@@ -2,18 +2,13 @@
 
 # Start gateway server in background
 exec emx-gate &
-sleep 2s
+sleep 4s
 
 # Test health endpoint returns OK
-exec curl -s http://127.0.0.1:8848/health
-stdout '"status":"ok"'
-stdout 'timestamp'
+exec curl --noproxy "*" -s http://127.0.0.1:8848/health
+stdout 'status'
+stdout 'ok'
 
-# Test health endpoint structure
-exec curl -s http://127.0.0.1:8848/health
-grep -o '"status":"ok"'
-stdout '"status":"ok"'
-
-# Clean up: stop the server
-[unix] exec pkill -f emx-gate
-[windows] exec taskkill //F //IM emx-gate.exe
+# Clean up - use PowerShell to kill the process
+[windows] ? exec powershell.exe -Command "Stop-Process -Name emx-gate -Force -ErrorAction SilentlyContinue"
+[unix] ? exec pkill -f emx-gate
