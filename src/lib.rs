@@ -4,6 +4,9 @@ mod config;
 mod message;
 mod provider;
 
+#[cfg(feature = "gate")]
+pub mod gate;
+
 use thiserror::Error;
 
 /// Result type for emx-llm operations
