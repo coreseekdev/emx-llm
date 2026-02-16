@@ -6,8 +6,10 @@ use crate::{create_client_for_model, ProviderConfig, ProviderType};
 use axum::{
     extract::State,
     http::StatusCode,
+    response::sse::{Event, Sse},
     Json,
 };
+use futures::stream::StreamExt;
 use serde_json::json;
 use serde_json::Value;
 use std::sync::Arc;
@@ -61,7 +63,7 @@ pub struct GatewayState {
     pub config: Arc<ProviderConfig>,
 }
 
-/// Handle OpenAI-compatible chat completions
+/// Handle OpenAI-compatible chat completions (non-streaming)
 pub async fn openai_chat_handler(
     State(state): State<GatewayState>,
     Json(request): Json<Value>,
@@ -157,6 +159,121 @@ pub async fn openai_chat_handler(
                     "total_tokens": 20
                 }
             })))
+        }
+    }
+}
+
+/// Handle OpenAI-compatible streaming chat completions
+pub async fn openai_chat_stream_handler(
+    State(state): State<GatewayState>,
+    Json(request): Json<Value>,
+) -> Result<Sse<impl futures::Stream<Item = Result<Event, std::io::Error>>>, StatusCode> {
+    let model = request
+        .get("model")
+        .and_then(|m| m.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    info!("OpenAI streaming request for model: {}", model);
+
+    let resolved = resolve_model(model, &state.config)
+        .map_err(|e| {
+            error!("Failed to resolve model '{}': {}", model, e);
+            StatusCode::NOT_FOUND
+        })?;
+
+    if resolved.provider_type != ProviderType::OpenAI {
+        error!(
+            "Model '{}' resolved to non-OpenAI provider: {:?}",
+            model, resolved.provider_type
+        );
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let messages_value = request
+        .get("messages")
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    let messages: Vec<Message> = serde_json::from_value(messages_value.clone())
+        .map_err(|e| {
+            error!("Failed to parse messages: {}", e);
+            StatusCode::BAD_REQUEST
+        })?;
+
+    match create_client_for_model(model) {
+        Ok((client, model_id)) => {
+            let stream = client.chat_stream(&messages, &model_id);
+            let model = model.to_string();
+            let created = chrono::Utc::now().timestamp();
+            let id = format!("chatcmpl-{}", uuid_simple());
+
+            let events: Vec<Result<Event, std::io::Error>> = stream.map(move |result| {
+                match result {
+                    Ok(event) => {
+                        if event.done {
+                            let json = json!({
+                                "id": id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "stop"
+                                }]
+                            });
+                            Ok(Event::default().data(json.to_string()))
+                        } else if !event.delta.is_empty() {
+                            let json = json!({
+                                "id": id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {
+                                        "content": event.delta
+                                    },
+                                    "finish_reason": null
+                                }]
+                            });
+                            Ok(Event::default().data(json.to_string()))
+                        } else {
+                            Ok(Event::default())
+                        }
+                    }
+                    Err(e) => {
+                        let json = json!({
+                            "error": {
+                                "message": e.to_string(),
+                                "type": "api_error"
+                            }
+                        });
+                        Ok(Event::default().data(json.to_string()))
+                    }
+                }
+            }).collect().await;
+
+            let stream = futures::stream::iter(events);
+            Ok(Sse::new(Box::pin(stream)))
+        }
+        Err(e) => {
+            info!("Model '{}' not configured, returning mock stream: {}", model, e);
+            let id = format!("chatcmpl-{}", uuid_simple());
+            let created = chrono::Utc::now().timestamp();
+
+            let mock_events = vec![
+                Ok(Event::default().data(format!(
+                    r#"{{"id":"{}","object":"chat.completion.chunk","created":{},"model":"{}","choices":[{{"index":0,"delta":{{"content":"Mock"}},"finish_reason":null}}]}}"#,
+                    id, created, model
+                ))),
+                Ok(Event::default().data(format!(
+                    r#"{{"id":"{}","object":"chat.completion.chunk","created":{},"model":"{}","choices":[{{"index":0,"delta":{{}},"finish_reason":"stop"}}]}}"#,
+                    id, created, model
+                ))),
+            ];
+
+            let stream = futures::stream::iter(mock_events);
+            Ok(Sse::new(Box::pin(stream)))
         }
     }
 }
