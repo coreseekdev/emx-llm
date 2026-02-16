@@ -192,7 +192,10 @@ impl ProviderConfig {
                     ProviderType::Anthropic => "ANTHROPIC_AUTH_TOKEN",
                 };
                 std::env::var(legacy_key).map_err(|_| {
-                    anyhow::anyhow!("{} not found in config or environment", format!("{}.api_key", base_key))
+                    anyhow::anyhow!(
+                        "{} not found in config or environment",
+                        format!("{}.api_key", base_key)
+                    )
                 })
             })?;
 
@@ -205,7 +208,10 @@ impl ProviderConfig {
                     ProviderType::Anthropic => "ANTHROPIC_BASE_URL",
                 };
                 std::env::var(legacy_key).map_err(|_| {
-                    anyhow::anyhow!("{} not found in config or environment", format!("{}.api_base", base_key))
+                    anyhow::anyhow!(
+                        "{} not found in config or environment",
+                        format!("{}.api_base", base_key)
+                    )
                 })
             })
             .unwrap_or_else(|_| provider_type.default_base_url().to_string());
@@ -284,9 +290,13 @@ impl ProviderConfig {
 
         // If full path provided (has provider prefix), resolve directly
         if parsed.provider_type.is_some() {
-            let model_config = Self::resolve_model_config(&config, &parsed)
-                .ok_or_else(|| anyhow::anyhow!("Model configuration not found for: {}", model_ref))?;
-            let model_id = model_config.model.clone().unwrap_or_else(|| parsed.model_name.clone());
+            let model_config = Self::resolve_model_config(&config, &parsed).ok_or_else(|| {
+                anyhow::anyhow!("Model configuration not found for: {}", model_ref)
+            })?;
+            let model_id = model_config
+                .model
+                .clone()
+                .unwrap_or_else(|| parsed.model_name.clone());
             return Ok((model_config, model_id));
         }
 
@@ -295,24 +305,37 @@ impl ProviderConfig {
         let matches = Self::find_sections_by_key(&toml_value, &parsed.model_name);
 
         match matches.len() {
-            0 => Err(anyhow::anyhow!("Model configuration not found for: {}", model_ref)),
+            0 => Err(anyhow::anyhow!(
+                "Model configuration not found for: {}",
+                model_ref
+            )),
             1 => {
                 // Unique match - use it
                 let full_ref = ModelReference {
                     full_path: matches[0].clone(),
-                    provider_type: Some(matches[0].split('.').next().unwrap_or("anthropic").to_string()),
+                    provider_type: Some(
+                        matches[0]
+                            .split('.')
+                            .next()
+                            .unwrap_or("anthropic")
+                            .to_string(),
+                    ),
                     model_name: parsed.model_name.clone(),
                 };
-                let model_config = Self::resolve_model_config(&config, &full_ref)
-                    .ok_or_else(|| anyhow::anyhow!("Model configuration not found for: {}", model_ref))?;
-                let model_id = model_config.model.clone().unwrap_or_else(|| parsed.model_name.clone());
+                let model_config =
+                    Self::resolve_model_config(&config, &full_ref).ok_or_else(|| {
+                        anyhow::anyhow!("Model configuration not found for: {}", model_ref)
+                    })?;
+                let model_id = model_config
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| parsed.model_name.clone());
                 Ok((model_config, model_id))
             }
             _ => {
                 // Multiple matches - report ambiguity
-                let match_list: Vec<String> = matches.iter()
-                    .map(|p| format!("  - {}", p))
-                    .collect();
+                let match_list: Vec<String> =
+                    matches.iter().map(|p| format!("  - {}", p)).collect();
                 Err(anyhow::anyhow!(
                     "Ambiguous model reference '{}'. Found {} matching sections:\n{}",
                     model_ref,
@@ -370,7 +393,11 @@ impl ProviderConfig {
 
         // Check each key in this table
         for (key, value) in table {
-            let new_path: Vec<&str> = current_path.iter().cloned().chain(std::iter::once(key.as_str())).collect();
+            let new_path: Vec<&str> = current_path
+                .iter()
+                .cloned()
+                .chain(std::iter::once(key.as_str()))
+                .collect();
 
             // If this key matches target and has a "model" field, it's a model section
             if key == target_key {
@@ -407,7 +434,11 @@ impl ProviderConfig {
         model_ref: &ModelReference,
     ) -> Option<ModelConfig> {
         // Get path segments from full_path first
-        let path_parts: Vec<String> = model_ref.full_path.split('.').map(|s| s.to_string()).collect();
+        let path_parts: Vec<String> = model_ref
+            .full_path
+            .split('.')
+            .map(|s| s.to_string())
+            .collect();
 
         // Determine provider type from explicit reference
         let explicit_provider_type = if let Some(pt) = &model_ref.provider_type {
@@ -427,7 +458,9 @@ impl ProviderConfig {
 
         // Try full path first if we have multiple segments
         if path_parts.len() > 1 {
-            if let Some(resolved) = Self::try_resolve_at_level(config, &path_parts, explicit_provider_type) {
+            if let Some(resolved) =
+                Self::try_resolve_at_level(config, &path_parts, explicit_provider_type)
+            {
                 // Only accept if model field is set at this level
                 if resolved.model.is_some() {
                     return Some(resolved);
@@ -437,7 +470,9 @@ impl ProviderConfig {
             // Try progressively shorter paths
             for i in (0..path_parts.len() - 1).rev() {
                 let search_path = path_parts[..=i].to_vec();
-                if let Some(resolved) = Self::try_resolve_at_level(config, &search_path, explicit_provider_type) {
+                if let Some(resolved) =
+                    Self::try_resolve_at_level(config, &search_path, explicit_provider_type)
+                {
                     return Some(resolved);
                 }
             }
@@ -445,7 +480,9 @@ impl ProviderConfig {
 
         // Try with just model name
         let search_path = vec![model_ref.model_name.clone()];
-        if let Some(resolved) = Self::try_resolve_at_level(config, &search_path, explicit_provider_type) {
+        if let Some(resolved) =
+            Self::try_resolve_at_level(config, &search_path, explicit_provider_type)
+        {
             return Some(resolved);
         }
 
@@ -505,16 +542,18 @@ impl ProviderConfig {
         })?;
 
         // Get api_base with hierarchical fallback
-        let api_base = find_key("api_base").or_else(|| {
-            find_key("base_url").or_else(|| {
-                // Fallback to legacy env vars
-                let legacy_key = match provider_type {
-                    ProviderType::OpenAI => "OPENAI_API_BASE",
-                    ProviderType::Anthropic => "ANTHROPIC_BASE_URL",
-                };
-                std::env::var(legacy_key).ok()
+        let api_base = find_key("api_base")
+            .or_else(|| {
+                find_key("base_url").or_else(|| {
+                    // Fallback to legacy env vars
+                    let legacy_key = match provider_type {
+                        ProviderType::OpenAI => "OPENAI_API_BASE",
+                        ProviderType::Anthropic => "ANTHROPIC_BASE_URL",
+                    };
+                    std::env::var(legacy_key).ok()
+                })
             })
-        }).unwrap_or_else(|| provider_type.default_base_url().to_string());
+            .unwrap_or_else(|| provider_type.default_base_url().to_string());
 
         // Get model name (may be None for provider-level config)
         let model = find_key("model");
@@ -544,6 +583,111 @@ impl ProviderConfig {
     /// Get the model, if set
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
+    }
+
+    /// List all configured models from TOML config
+    /// Returns a list of (full_model_ref, model_config) tuples
+    pub fn list_models() -> anyhow::Result<Vec<(String, ModelConfig)>> {
+        let toml_value = Self::load_toml_config()?;
+        let mut models = Vec::new();
+
+        Self::collect_models_from_toml(&toml_value, &["llm", "provider"], "", &mut models);
+
+        Ok(models)
+    }
+
+    /// Recursively collect model configurations from TOML
+    fn collect_models_from_toml(
+        toml_value: &toml::Value,
+        current_path: &[&str],
+        prefix: &str,
+        models: &mut Vec<(String, ModelConfig)>,
+    ) {
+        let mut current = Some(toml_value);
+        for part in current_path {
+            current = current.and_then(|v| v.get(*part));
+        }
+
+        let Some(table) = current.and_then(|v| v.as_table()) else {
+            return;
+        };
+
+        for (key, value) in table {
+            let new_path: Vec<&str> = current_path
+                .iter()
+                .cloned()
+                .chain(std::iter::once(key.as_str()))
+                .collect();
+
+            if let Some(sub_table) = value.as_table() {
+                // If this has a "type" field, it's a provider section
+                // If this has a "model" field (and type is above), it's a model section
+                if sub_table.contains_key("api_base") || sub_table.contains_key("api_key") {
+                    // This is a provider or sub-provider
+                    let new_prefix = if prefix.is_empty() {
+                        key.to_string()
+                    } else {
+                        format!("{}.{}", prefix, key)
+                    };
+                    Self::collect_models_from_toml(toml_value, &new_path, &new_prefix, models);
+                } else if sub_table.contains_key("model") {
+                    // This is a model section
+                    let model_ref = if prefix.is_empty() {
+                        key.to_string()
+                    } else {
+                        format!("{}.{}", prefix, key)
+                    };
+
+                    // Try to load this model's config
+                    if let Ok((config, _)) = Self::load_for_model(&model_ref) {
+                        models.push((model_ref, config));
+                    }
+                } else {
+                    // Continue searching deeper
+                    let new_prefix = if prefix.is_empty() {
+                        key.to_string()
+                    } else {
+                        format!("{}.{}", prefix, key)
+                    };
+                    Self::collect_models_from_toml(toml_value, &new_path, &new_prefix, models);
+                }
+            }
+        }
+    }
+
+    /// List all configured providers
+    pub fn list_providers() -> anyhow::Result<Vec<(String, ProviderType)>> {
+        let toml_value = Self::load_toml_config()?;
+        let mut providers = Vec::new();
+
+        // Navigate to llm.provider
+        let provider_section = toml_value
+            .get("llm")
+            .and_then(|v| v.get("provider"))
+            .and_then(|v| v.as_table());
+
+        if let Some(table) = provider_section {
+            for (key, value) in table {
+                if let Some(sub_table) = value.as_table() {
+                    // Check for type field
+                    if let Some(type_value) = sub_table.get("type") {
+                        if let Some(type_str) = type_value.as_str() {
+                            match type_str.to_lowercase().as_str() {
+                                "openai" => {
+                                    providers.push((key.to_string(), ProviderType::OpenAI));
+                                }
+                                "anthropic" => {
+                                    providers.push((key.to_string(), ProviderType::Anthropic));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(providers)
     }
 }
 
@@ -600,12 +744,12 @@ impl ModelConfig {
 
     /// Get the model name, or a default based on provider type
     pub fn model_name(&self) -> String {
-        self.model.clone().unwrap_or_else(|| {
-            match self.provider_type {
+        self.model
+            .clone()
+            .unwrap_or_else(|| match self.provider_type {
                 ProviderType::OpenAI => "gpt-4".to_string(),
                 ProviderType::Anthropic => "claude-3-opus-20240229".to_string(),
-            }
-        })
+            })
     }
 }
 
@@ -658,7 +802,11 @@ impl ModelReference {
         };
 
         // Model name is the last segment after "."
-        let model_name = full_path.split('.').last().unwrap_or(&full_path).to_string();
+        let model_name = full_path
+            .split('.')
+            .last()
+            .unwrap_or(&full_path)
+            .to_string();
 
         Ok(ModelReference {
             full_path,

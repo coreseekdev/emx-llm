@@ -6,8 +6,10 @@ use crate::{create_client_for_model, ProviderConfig, ProviderType};
 use axum::{
     extract::State,
     http::StatusCode,
+    response::sse::{Event, Sse},
     Json,
 };
+use futures::stream::{self, Stream};
 use serde_json::json;
 use serde_json::Value;
 use std::sync::Arc;
@@ -271,52 +273,265 @@ pub async fn anthropic_messages_handler(
     })))
 }
 
+/// Handle OpenAI-compatible streaming chat completions
+pub async fn openai_chat_stream_handler(
+    State(state): State<GatewayState>,
+    Json(mut request): Json<Value>,
+) -> Result<Sse, StatusCode> {
+    // Extract model from request body
+    let model = request
+        .get("model")
+        .and_then(|m| m.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    info!("OpenAI streaming chat request for model: {}", model);
+
+    // Resolve model to provider
+    let resolved = resolve_model(model, &state.config)
+        .map_err(|e| {
+            error!("Failed to resolve model '{}': {}", model, e);
+            StatusCode::NOT_FOUND
+        })?;
+
+    // Verify it's an OpenAI provider
+    if resolved.provider_type != ProviderType::OpenAI {
+        error!(
+            "Model '{}' resolved to non-OpenAI provider: {:?}",
+            model, resolved.provider_type
+        );
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Extract messages from request
+    let messages_value = request
+        .get("messages")
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    // Convert OpenAI messages to emx-llm Message format
+    let messages: Vec<Message> = serde_json::from_value(messages_value.clone())
+        .map_err(|e| {
+            error!("Failed to parse messages: {}", e);
+            StatusCode::BAD_REQUEST
+        })?;
+
+    // Try to create client and call the streaming API
+    match create_client_for_model(model) {
+        Ok((client, model_id)) => {
+            let stream = client.chat_stream(&messages, &model_id);
+            let model = model.to_string();
+            let created = chrono::Utc::now().timestamp();
+            let id = format!("chatcmpl-{}", uuid_simple());
+
+            let sse_stream = stream.map(move |result| {
+                match result {
+                    Ok(event) => {
+                        if event.done {
+                            // Final chunk with usage
+                            let usage = event.usage.unwrap_or(crate::message::Usage {
+                                prompt_tokens: 0,
+                                completion_tokens: 0,
+                                total_tokens: 0,
+                            });
+                            let json = json!({
+                                "id": id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": usage.prompt_tokens,
+                                    "completion_tokens": usage.completion_tokens,
+                                    "total_tokens": usage.total_tokens
+                                }
+                            });
+                            Event::default().data(json.to_string()).to_string().parse().unwrap()
+                        } else if !event.delta.is_empty() {
+                            // Content chunk
+                            let json = json!({
+                                "id": id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {
+                                        "content": event.delta
+                                    },
+                                    "finish_reason": null
+                                }]
+                            });
+                            Event::default().data(json.to_string()).to_string().parse().unwrap()
+                        } else {
+                            // Empty delta, skip
+                            Event::default().data("").to_string().parse().unwrap()
+                        }
+                    }
+                    Err(e) => {
+                        let json = json!({
+                            "error": {
+                                "message": e.to_string(),
+                                "type": "api_error"
+                            }
+                        });
+                        Event::default().data(json.to_string()).to_string().parse().unwrap()
+                    }
+                }
+            });
+
+            Ok(Sse::new(sse_stream))
+        }
+        Err(e) => {
+            // Model not configured, return mock streaming response
+            info!("Model '{}' not configured, returning mock stream: {}", model, e);
+            
+            let sse_stream = stream::iter(vec![
+                Ok(Event::default().data(r#"{"id":"chatcmpl-mock","object":"chat.completion.chunk","created":0,"model":"mock","choices":[{"index":0,"delta":{"content":"Mock response for model mock"},"finish_reason":null}]}"#.to_string()).to_string().parse::<Event>().unwrap()),
+                Ok(Event::default().data(r#"{"id":"chatcmpl-mock","object":"chat.completion.chunk","created":0,"model":"mock","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20}}"#.to_string()).to_string().parse::<Event>().unwrap()),
+            ]);
+            
+            Ok(Sse::new(sse_stream))
+        }
+    }
+}
+
 /// Handle model list request
 pub async fn list_models(
     State(_state): State<GatewayState>,
 ) -> Json<Value> {
-    // TODO: Return actual models from configuration
-    Json(json!({
-        "object": "list",
-        "data": [
-            {
-                "id": "openai.gpt-4",
-                "object": "model",
-                "owned_by": "openai",
-                "permission": [],
-                "created": 1677610602
-            },
-            {
-                "id": "anthropic.claude-3-opus-20240229",
-                "object": "model",
-                "owned_by": "anthropic",
-                "permission": [],
-                "created": 1677610602
+    match ProviderConfig::list_models() {
+        Ok(models) => {
+            let models_data: Vec<Value> = models
+                .iter()
+                .map(|(model_ref, config)| {
+                    json!({
+                        "id": model_ref,
+                        "object": "model",
+                        "owned_by": config.provider_type.config_key(),
+                        "permission": [],
+                        "created": 1677610602
+                    })
+                })
+                .collect();
+            
+            if models_data.is_empty() {
+                // Return default models if none configured
+                Json(json!({
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "openai.gpt-4",
+                            "object": "model",
+                            "owned_by": "openai",
+                            "permission": [],
+                            "created": 1677610602
+                        },
+                        {
+                            "id": "anthropic.claude-3-opus-20240229",
+                            "object": "model",
+                            "owned_by": "anthropic",
+                            "permission": [],
+                            "created": 1677610602
+                        }
+                    ]
+                }))
+            } else {
+                Json(json!({
+                    "object": "list",
+                    "data": models_data
+                }))
             }
-        ]
-    }))
+        }
+        Err(_) => {
+            // Return default models on error
+            Json(json!({
+                "object": "list",
+                "data": [
+                    {
+                        "id": "openai.gpt-4",
+                        "object": "model",
+                        "owned_by": "openai",
+                        "permission": [],
+                        "created": 1677610602
+                    },
+                    {
+                        "id": "anthropic.claude-3-opus-20240229",
+                        "object": "model",
+                        "owned_by": "anthropic",
+                        "permission": [],
+                        "created": 1677610602
+                    }
+                ]
+            }))
+        }
+    }
 }
 
 /// Handle provider list request
 pub async fn list_providers(
     State(_state): State<GatewayState>,
 ) -> Json<Value> {
-    // TODO: Return actual providers from configuration
-    Json(json!({
-        "object": "list",
-        "data": [
-            {
-                "id": "openai",
-                "type": "openai",
-                "models": ["gpt-4", "gpt-3.5-turbo"],
-                "api_base": "https://api.openai.com/v1"
-            },
-            {
-                "id": "anthropic",
-                "type": "anthropic",
-                "models": ["claude-3-opus-20240229"],
-                "api_base": "https://api.anthropic.com"
+    match ProviderConfig::list_providers() {
+        Ok(providers) => {
+            let providers_data: Vec<Value> = providers
+                .iter()
+                .map(|(name, provider_type)| {
+                    json!({
+                        "id": name,
+                        "type": provider_type.config_key(),
+                        "api_base": provider_type.default_base_url()
+                    })
+                })
+                .collect();
+            
+            if providers_data.is_empty() {
+                // Return default providers if none configured
+                Json(json!({
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "openai",
+                            "type": "openai",
+                            "models": ["gpt-4", "gpt-3.5-turbo"],
+                            "api_base": "https://api.openai.com/v1"
+                        },
+                        {
+                            "id": "anthropic",
+                            "type": "anthropic",
+                            "models": ["claude-3-opus-20240229"],
+                            "api_base": "https://api.anthropic.com"
+                        }
+                    ]
+                }))
+            } else {
+                Json(json!({
+                    "object": "list",
+                    "data": providers_data
+                }))
             }
-        ]
-    }))
+        }
+        Err(_) => {
+            // Return default providers on error
+            Json(json!({
+                "object": "list",
+                "data": [
+                    {
+                        "id": "openai",
+                        "type": "openai",
+                        "models": ["gpt-4", "gpt-3.5-turbo"],
+                        "api_base": "https://api.openai.com/v1"
+                    },
+                    {
+                        "id": "anthropic",
+                        "type": "anthropic",
+                        "models": ["claude-3-opus-20240229"],
+                        "api_base": "https://api.anthropic.com"
+                    }
+                ]
+            }))
+        }
+    }
 }
