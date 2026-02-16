@@ -12,6 +12,10 @@ pub struct GatewayConfig {
     /// Port to listen on
     #[serde(default = "default_port")]
     pub port: u16,
+
+    /// Request timeout in seconds (default: 120)
+    #[serde(default = "default_timeout")]
+    pub timeout_secs: u64,
 }
 
 impl Default for GatewayConfig {
@@ -19,6 +23,7 @@ impl Default for GatewayConfig {
         Self {
             host: default_host(),
             port: default_port(),
+            timeout_secs: default_timeout(),
         }
     }
 }
@@ -29,4 +34,8 @@ fn default_host() -> String {
 
 fn default_port() -> u16 {
     8848
+}
+
+fn default_timeout() -> u64 {
+    120
 }
