@@ -4,6 +4,7 @@
 
 pub mod config;
 pub mod handlers;
+pub mod provider_handlers;
 pub mod router;
 pub mod server;
 

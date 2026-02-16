@@ -2,6 +2,7 @@
 
 use crate::gate::config::GatewayConfig;
 use crate::gate::handlers::{self, GatewayState};
+use crate::gate::provider_handlers;
 use crate::ProviderConfig;
 use axum::{
     extract::Request,
@@ -33,13 +34,13 @@ pub async fn start_server(config: GatewayConfig) -> anyhow::Result<()> {
     // Build our application with routes
     let app = Router::new()
         // OpenAI-compatible endpoints
-        .route("/v1/chat/completions", post(handlers::openai_chat_handler))
-        .route("/v1/chat/completions", get(handlers::openai_chat_stream_handler))
+        .route("/openai/v1/chat/completions", post(handlers::openai_chat_handler))
+        .route("/openai/v1/models", get(provider_handlers::list_openai_models))
         // Anthropic-compatible endpoints
-        .route("/v1/messages", post(handlers::anthropic_messages_handler))
+        .route("/anthropic/v1/messages", post(handlers::anthropic_messages_handler))
+        .route("/anthropic/v1/models", get(provider_handlers::list_anthropic_models))
         // Utility endpoints
         .route("/health", get(health_check))
-        .route("/v1/models", get(handlers::list_models))
         .route("/v1/providers", get(handlers::list_providers))
         .with_state(state)
         .layer(middleware::from_fn(logging_middleware));
