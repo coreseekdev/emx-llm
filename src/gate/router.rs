@@ -17,10 +17,7 @@ pub struct ResolvedModel {
 }
 
 /// Resolve a model reference string to provider configuration
-pub fn resolve_model(
-    model: &str,
-    _config: &ProviderConfig,
-) -> Result<ResolvedModel, String> {
+pub fn resolve_model(model: &str, _config: &ProviderConfig) -> Result<ResolvedModel, String> {
     // Parse model reference
     let model_ref = parse_model_reference(model)?;
 
@@ -79,8 +76,8 @@ fn parse_model_reference(model: &str) -> Result<ModelReference, String> {
 /// Parse provider type from string
 fn parse_provider_type(s: &str) -> Result<ProviderType, String> {
     match s.to_lowercase().as_str() {
-        "openai" => Ok(ProviderType::OpenAI),
-        "anthropic" => Ok(ProviderType::Anthropic),
+        "openai" | "glm" => Ok(ProviderType::OpenAI),
+        "anthropic" | "claude" => Ok(ProviderType::Anthropic),
         _ => Err(format!("Unknown provider type: {}", s)),
     }
 }

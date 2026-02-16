@@ -1,7 +1,9 @@
 //! Gateway HTTP server
 
+use crate::gate::anthropic_handlers;
 use crate::gate::config::GatewayConfig;
 use crate::gate::handlers::{self, GatewayState};
+use crate::gate::openai_handlers;
 use crate::gate::provider_handlers;
 use crate::ProviderConfig;
 use axum::{
@@ -34,10 +36,10 @@ pub async fn start_server(config: GatewayConfig) -> anyhow::Result<()> {
     // Build our application with routes
     let app = Router::new()
         // OpenAI-compatible endpoints
-        .route("/openai/v1/chat/completions", post(handlers::openai_chat_handler))
+        .route("/openai/v1/chat/completions", post(openai_handlers::chat_handler))
         .route("/openai/v1/models", get(provider_handlers::list_openai_models))
         // Anthropic-compatible endpoints
-        .route("/anthropic/v1/messages", post(handlers::anthropic_messages_handler))
+        .route("/anthropic/v1/messages", post(anthropic_handlers::messages_handler))
         .route("/anthropic/v1/models", get(provider_handlers::list_anthropic_models))
         // Utility endpoints
         .route("/health", get(health_check))
