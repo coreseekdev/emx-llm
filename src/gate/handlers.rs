@@ -167,57 +167,43 @@ pub async fn anthropic_messages_handler(
     State(state): State<GatewayState>,
     Json(mut request): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
-    // Extract model from request body
-    let model = request
-        .get("model")
-        .and_then(|m| m.as_str())
-        .ok_or(StatusCode::BAD_REQUEST)?;
+    let model = match request.get("model").and_then(|m| m.as_str()) {
+        Some(m) => m,
+        None => return Err(StatusCode::BAD_REQUEST),
+    };
 
     info!("Anthropic messages request for model: {}", model);
 
-    // Resolve model to provider
-    let resolved = resolve_model(model, &state.config)
-        .map_err(|e| {
+    let resolved = match resolve_model(model, &state.config) {
+        Ok(r) => r,
+        Err(e) => {
             error!("Failed to resolve model '{}': {}", model, e);
-            StatusCode::NOT_FOUND
-        })?;
+            return Err(StatusCode::NOT_FOUND);
+        }
+    };
 
-    // Verify it's an Anthropic provider
     if resolved.provider_type != ProviderType::Anthropic {
-        error!(
-            "Model '{}' resolved to non-Anthropic provider: {:?}",
-            model, resolved.provider_type
-        );
+        error!("Model '{}' resolved to non-Anthropic provider: {:?}", model, resolved.provider_type);
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Extract messages from request
-    let messages_value = request
-        .get("messages")
-        .ok_or(StatusCode::BAD_REQUEST)?;
+    let messages_value = match request.get("messages") {
+        Some(v) => v,
+        None => return Err(StatusCode::BAD_REQUEST),
+    };
 
-    // Extract max_tokens
-    let max_tokens = request
-        .get("max_tokens")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u32)
-        .unwrap_or(1024);
-
-    // Convert Anthropic messages to emx-llm Message format
-    // Anthropic uses the same message format as OpenAI
-    let messages: Vec<Message> = serde_json::from_value(messages_value.clone())
-        .map_err(|e| {
+    let messages: Vec<Message> = match serde_json::from_value(messages_value.clone()) {
+        Ok(m) => m,
+        Err(e) => {
             error!("Failed to parse messages: {}", e);
-            StatusCode::BAD_REQUEST
-        })?;
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    };
 
-    // Try to create client and call the API
     match create_client_for_model(model) {
         Ok((client, model_id)) => {
-            // Call the actual API
             match client.chat(&messages, &model_id).await {
                 Ok((content, usage)) => {
-                    // Convert response to Anthropic format
                     Ok(Json(json!({
                         "id": format!("msg_{}", uuid_simple()),
                         "type": "message",
@@ -241,7 +227,6 @@ pub async fn anthropic_messages_handler(
             }
         }
         Err(e) => {
-            // Model not configured, return mock response
             info!("Model '{}' not configured, returning mock response: {}", model, e);
             Ok(Json(json!({
                 "id": "msg-mock",
@@ -261,51 +246,9 @@ pub async fn anthropic_messages_handler(
         }
     }
 }
-
-    // Try to create client, but fall back to mock if not configured
-    let model_name = match create_client_for_model(model) {
-        Ok((_client, name)) => name,
-        Err(_) => {
-            // Model not configured, return mock response
-            info!("Model '{}' not configured, returning mock response", model);
-            return Ok(Json(json!({
-                "id": "msg-mock",
-                "type": "message",
-                "role": "assistant",
-                "content": [{
-                    "type": "text",
-                    "text": "Mock response for model ".to_string() + model
-                }],
-                "model": model,
-                "stop_reason": "end_turn",
-                "usage": {
-                    "input_tokens": 10,
-                    "output_tokens": 10
-                }
-            })));
-        }
-    };
-
-    // TODO: Implement actual Anthropic message handling
-    // For now, return a mock response
-    Ok(Json(json!({
-        "id": "msg-mock",
-        "type": "message",
-        "role": "assistant",
-        "content": [{
-            "type": "text",
-            "text": "Mock response for model ".to_string() + model
-        }],
-        "model": model_name,
-        "stop_reason": "end_turn",
-        "usage": {
-            "input_tokens": 10,
-            "output_tokens": 10
-        }
-    })))
-}
-
+ 
 /// Handle OpenAI-compatible streaming chat completions
+#[allow(dead_code)]
 pub async fn openai_chat_stream_handler(
     State(state): State<GatewayState>,
     Json(mut request): Json<Value>,
