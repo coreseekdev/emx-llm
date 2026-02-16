@@ -34,7 +34,6 @@ pub async fn start_server(config: GatewayConfig) -> anyhow::Result<()> {
     let app = Router::new()
         // OpenAI-compatible endpoints
         .route("/v1/chat/completions", post(handlers::openai_chat_handler))
-        .route("/v1/chat/completions", get(handlers::openai_chat_stream_handler))
         // Anthropic-compatible endpoints
         .route("/v1/messages", post(handlers::anthropic_messages_handler))
         // Utility endpoints

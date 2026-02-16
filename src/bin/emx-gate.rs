@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::Parser;
 use emx_llm::gate::config::GatewayConfig;
 use emx_llm::gate::server::start_server;
-use emx_llm::ProviderConfig;
+use emx_llm::{ProviderConfig};
 use std::path::Path;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -45,11 +45,6 @@ fn load_gateway_config(config_path: &str) -> Result<GatewayConfig> {
     let content = std::fs::read_to_string(config_path)?;
     let config: GatewayConfig = toml::from_str(&content)?;
     Ok(config)
-}
-
-/// Load provider configurations from file
-fn load_provider_configs(config_path: &str) -> Result<Vec<(String, ProviderConfig)>> {
-    ProviderConfig::list_models()
 }
 
 #[tokio::main]
@@ -125,7 +120,7 @@ async fn validate_config(config: &GatewayConfig, config_file: Option<&str>) -> R
     println!("  Timeout: {}s", config.timeout_secs);
 
     // Validate port range
-    if config.port < 1024 || config.port > 65535 {
+    if config.port < 1024 {
         anyhow::bail!("Invalid port: {} (must be between 1024 and 65535)", config.port);
     }
 
@@ -135,7 +130,7 @@ async fn validate_config(config: &GatewayConfig, config_file: Option<&str>) -> R
     }
 
     // Try to load provider configs
-    if let Some(file) = config_file {
+    if let Some(_file) = config_file {
         match ProviderConfig::list_models() {
             Ok(models) => {
                 println!("  Providers configured: {}", models.len());
@@ -154,7 +149,7 @@ async fn validate_config(config: &GatewayConfig, config_file: Option<&str>) -> R
 }
 
 /// Test configuration (test provider connections)
-async fn test_config(config: &GatewayConfig) -> Result<()> {
+async fn test_config(_config: &GatewayConfig) -> Result<()> {
     println!("Testing configuration...");
 
     // Load provider configs

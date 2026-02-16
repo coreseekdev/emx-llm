@@ -6,10 +6,8 @@ use crate::{create_client_for_model, ProviderConfig, ProviderType};
 use axum::{
     extract::State,
     http::StatusCode,
-    response::sse::{Event, Sse},
     Json,
 };
-use futures::stream::{self, Stream};
 use serde_json::json;
 use serde_json::Value;
 use std::sync::Arc;
@@ -24,6 +22,7 @@ fn uuid_simple() -> String {
     format!("{:x}{:x}", duration.as_secs(), duration.subsec_nanos())
 }
 
+#[allow(dead_code)]
 /// Create an OpenAI-compatible error response
 fn openai_error(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
     let error_type = match status {
@@ -45,6 +44,7 @@ fn openai_error(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) 
     })))
 }
 
+#[allow(dead_code)]
 /// Create an Anthropic-compatible error response
 fn anthropic_error(message: &str) -> (StatusCode, Json<Value>) {
     (StatusCode::BAD_REQUEST, Json(json!({
@@ -64,7 +64,7 @@ pub struct GatewayState {
 /// Handle OpenAI-compatible chat completions
 pub async fn openai_chat_handler(
     State(state): State<GatewayState>,
-    Json(mut request): Json<Value>,
+    Json(request): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     // Extract model from request body
     let model = request
@@ -78,7 +78,7 @@ pub async fn openai_chat_handler(
     let resolved = resolve_model(model, &state.config)
         .map_err(|e| {
             error!("Failed to resolve model '{}': {}", model, e);
-            openai_error(StatusCode::NOT_FOUND, &format!("Model '{}' not found: {}", model, e))
+            StatusCode::NOT_FOUND
         })?;
 
     // Verify it's an OpenAI provider
@@ -87,20 +87,19 @@ pub async fn openai_chat_handler(
             "Model '{}' resolved to non-OpenAI provider: {:?}",
             model, resolved.provider_type
         );
-        return Err(openai_error(StatusCode::BAD_REQUEST, 
-            &format!("Model '{}' is not an OpenAI model", model)).1);
+        return Err(StatusCode::BAD_REQUEST);
     }
 
     // Extract messages from request
     let messages_value = request
         .get("messages")
-        .ok_or(openai_error(StatusCode::BAD_REQUEST, "Missing 'messages' field in request body"))?;
+        .ok_or(StatusCode::BAD_REQUEST)?;
 
     // Convert OpenAI messages to emx-llm Message format
     let messages: Vec<Message> = serde_json::from_value(messages_value.clone())
         .map_err(|e| {
             error!("Failed to parse messages: {}", e);
-            openai_error(StatusCode::BAD_REQUEST, &format!("Invalid messages format: {}", e)).1
+            StatusCode::BAD_REQUEST
         })?;
 
     // Try to create client and call the API
@@ -132,7 +131,7 @@ pub async fn openai_chat_handler(
                 }
                 Err(e) => {
                     error!("API call failed: {}", e);
-                    Err(openai_error(StatusCode::BAD_GATEWAY, &format!("Provider API error: {}", e)).1)
+                    Err(StatusCode::BAD_GATEWAY)
                 }
             }
         }
@@ -165,7 +164,7 @@ pub async fn openai_chat_handler(
 /// Handle Anthropic-compatible messages
 pub async fn anthropic_messages_handler(
     State(state): State<GatewayState>,
-    Json(mut request): Json<Value>,
+    Json(request): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     let model = match request.get("model").and_then(|m| m.as_str()) {
         Some(m) => m,
@@ -243,132 +242,6 @@ pub async fn anthropic_messages_handler(
                     "output_tokens": 10
                 }
             })))
-        }
-    }
-}
- 
-/// Handle OpenAI-compatible streaming chat completions
-#[allow(dead_code)]
-pub async fn openai_chat_stream_handler(
-    State(state): State<GatewayState>,
-    Json(mut request): Json<Value>,
-) -> Result<Sse, StatusCode> {
-    // Extract model from request body
-    let model = request
-        .get("model")
-        .and_then(|m| m.as_str())
-        .ok_or(StatusCode::BAD_REQUEST)?;
-
-    info!("OpenAI streaming chat request for model: {}", model);
-
-    // Resolve model to provider
-    let resolved = resolve_model(model, &state.config)
-        .map_err(|e| {
-            error!("Failed to resolve model '{}': {}", model, e);
-            StatusCode::NOT_FOUND
-        })?;
-
-    // Verify it's an OpenAI provider
-    if resolved.provider_type != ProviderType::OpenAI {
-        error!(
-            "Model '{}' resolved to non-OpenAI provider: {:?}",
-            model, resolved.provider_type
-        );
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    // Extract messages from request
-    let messages_value = request
-        .get("messages")
-        .ok_or(StatusCode::BAD_REQUEST)?;
-
-    // Convert OpenAI messages to emx-llm Message format
-    let messages: Vec<Message> = serde_json::from_value(messages_value.clone())
-        .map_err(|e| {
-            error!("Failed to parse messages: {}", e);
-            StatusCode::BAD_REQUEST
-        })?;
-
-    // Try to create client and call the streaming API
-    match create_client_for_model(model) {
-        Ok((client, model_id)) => {
-            let stream = client.chat_stream(&messages, &model_id);
-            let model = model.to_string();
-            let created = chrono::Utc::now().timestamp();
-            let id = format!("chatcmpl-{}", uuid_simple());
-
-            let sse_stream = stream.map(move |result| {
-                match result {
-                    Ok(event) => {
-                        if event.done {
-                            // Final chunk with usage
-                            let usage = event.usage.unwrap_or(crate::message::Usage {
-                                prompt_tokens: 0,
-                                completion_tokens: 0,
-                                total_tokens: 0,
-                            });
-                            let json = json!({
-                                "id": id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {},
-                                    "finish_reason": "stop"
-                                }],
-                                "usage": {
-                                    "prompt_tokens": usage.prompt_tokens,
-                                    "completion_tokens": usage.completion_tokens,
-                                    "total_tokens": usage.total_tokens
-                                }
-                            });
-                            Event::default().data(json.to_string()).to_string().parse().unwrap()
-                        } else if !event.delta.is_empty() {
-                            // Content chunk
-                            let json = json!({
-                                "id": id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {
-                                        "content": event.delta
-                                    },
-                                    "finish_reason": null
-                                }]
-                            });
-                            Event::default().data(json.to_string()).to_string().parse().unwrap()
-                        } else {
-                            // Empty delta, skip
-                            Event::default().data("").to_string().parse().unwrap()
-                        }
-                    }
-                    Err(e) => {
-                        let json = json!({
-                            "error": {
-                                "message": e.to_string(),
-                                "type": "api_error"
-                            }
-                        });
-                        Event::default().data(json.to_string()).to_string().parse().unwrap()
-                    }
-                }
-            });
-
-            Ok(Sse::new(sse_stream))
-        }
-        Err(e) => {
-            // Model not configured, return mock streaming response
-            info!("Model '{}' not configured, returning mock stream: {}", model, e);
-            
-            let sse_stream = stream::iter(vec![
-                Ok(Event::default().data(r#"{"id":"chatcmpl-mock","object":"chat.completion.chunk","created":0,"model":"mock","choices":[{"index":0,"delta":{"content":"Mock response for model mock"},"finish_reason":null}]}"#.to_string()).to_string().parse::<Event>().unwrap()),
-                Ok(Event::default().data(r#"{"id":"chatcmpl-mock","object":"chat.completion.chunk","created":0,"model":"mock","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20}}"#.to_string()).to_string().parse::<Event>().unwrap()),
-            ]);
-            
-            Ok(Sse::new(sse_stream))
         }
     }
 }
