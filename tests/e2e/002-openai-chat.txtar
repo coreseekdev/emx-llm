@@ -1,0 +1,36 @@
+# Test OpenAI-compatible chat completions endpoint
+
+# Start gateway
+exec emx-gate &
+sleep 2s
+
+# Test basic chat completion
+exec curl -s -X POST http://127.0.0.1:8848/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"openai.gpt-4","messages":[{"role":"user","content":"Hello"}]}'
+stdout '"object":"chat.completion"'
+stdout '"model":"openai.gpt-4"'
+stdout 'choices'
+
+# Test response structure
+exec curl -s -X POST http://127.0.0.1:8848/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"openai.gpt-4","messages":[{"role":"user","content":"Test"}]}'
+grep -o '"object":"chat.completion"'
+stdout '"object":"chat.completion"'
+
+# Test with system message
+exec curl -s -X POST http://127.0.0.1:8848/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"openai.gpt-4","messages":[{"role":"system","content":"You are helpful"},{"role":"user","content":"Hi"}]}'
+stdout 'assistant'
+
+# Test usage information
+exec curl -s -X POST http://127.0.0.1:8848/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"openai.gpt-4","messages":[{"role":"user","content":"Hello"}]}'
+stdout 'usage'
+
+# Clean up
+[unix] exec pkill -f emx-gate
+[windows] exec taskkill //F //IM emx-gate.exe

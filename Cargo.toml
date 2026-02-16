@@ -66,3 +66,5 @@ gate = ["axum", "tower", "tower-http", "hyper", "http-body-util"]
 wiremock = "0.6"
 # Txtar fixture format (same workspace)
 emx-txtar = { git = "https://github.com/coreseekdev/emx-txtar" }
+# E2E testing framework
+emx-testspec = { git = "https://github.com/coreseekdev/emx-testspec" }

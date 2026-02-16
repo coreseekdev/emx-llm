@@ -1,0 +1,35 @@
+# Test error handling
+
+# Start gateway
+exec emx-gate &
+sleep 2s
+
+# Test 404 - unknown model
+exec curl -s -X POST http://127.0.0.1:8848/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"unknown.model","messages":[{"role":"user","content":"Hello"}]}'
+stdout 'error'
+
+# Test 400 - missing model field
+! exec curl -s -X POST http://127.0.0.1:8848/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Hello"}]}'
+# Should return error (not 200)
+
+# Test 400 - malformed JSON
+! exec curl -s -X POST http://127.0.0.1:8848/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{invalid json'
+# Should return error
+
+# Test 405 - wrong method
+! exec curl -s -X POST http://127.0.0.1:8848/health
+# Should return error (health is GET only)
+
+# Test 404 - invalid endpoint
+! exec curl -s http://127.0.0.1:8848/invalid/endpoint
+# Should return 404
+
+# Clean up
+[unix] exec pkill -f emx-gate
+[windows] exec taskkill //F //IM emx-gate.exe

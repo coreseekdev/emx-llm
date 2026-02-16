@@ -1,0 +1,33 @@
+# Test model and provider listing endpoints
+
+# Start gateway
+exec emx-gate &
+sleep 2s
+
+# Test /v1/models endpoint
+exec curl -s http://127.0.0.1:8848/v1/models
+stdout '"object":"list"'
+stdout '"data"'
+
+# Verify specific models exist
+exec curl -s http://127.0.0.1:8848/v1/models | grep 'openai.gpt-4'
+stdout 'openai.gpt-4'
+
+exec curl -s http://127.0.0.1:8848/v1/models | grep 'anthropic.claude-3-opus-20240229'
+stdout 'anthropic.claude-3-opus-20240229'
+
+# Test /v1/providers endpoint
+exec curl -s http://127.0.0.1:8848/v1/providers
+stdout '"object":"list"'
+stdout '"data"'
+
+# Verify provider types
+exec curl -s http://127.0.0.1:8848/v1/providers | grep '"type":"openai"'
+stdout '"type":"openai"'
+
+exec curl -s http://127.0.0.1:8848/v1/providers | grep '"type":"anthropic"'
+stdout '"type":"anthropic"'
+
+# Clean up
+[unix] exec pkill -f emx-gate
+[windows] exec taskkill //F //IM emx-gate.exe

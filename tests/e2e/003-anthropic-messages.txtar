@@ -1,0 +1,30 @@
+# Test Anthropic-compatible messages endpoint
+
+# Start gateway
+exec emx-gate &
+sleep 2s
+
+# Test basic message
+exec curl -s -X POST http://127.0.0.1:8848/v1/messages \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"anthropic.claude-3-opus-20240229","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}'
+stdout '"type":"message"'
+stdout '"role":"assistant"'
+stdout 'content'
+
+# Test with multiple messages
+exec curl -s -X POST http://127.0.0.1:8848/v1/messages \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"anthropic.claude-3-opus-20240229","max_tokens":1024,"messages":[{"role":"user","content":"Hello"},{"role":"assistant","content":"Hi there!"},{"role":"user","content":"How are you?"}]}'
+stdout 'stop_reason'
+
+# Test response structure
+exec curl -s -X POST http://127.0.0.1:8848/v1/messages \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"anthropic.claude-3-opus-20240229","max_tokens":100,"messages":[{"role":"user","content":"Hi"}]}'
+grep -o '"type":"message"'
+stdout '"type":"message"'
+
+# Clean up
+[unix] exec pkill -f emx-gate
+[windows] exec taskkill //F //IM emx-gate.exe
