@@ -255,6 +255,7 @@ impl Client for OpenAIClient {
 
             use futures::StreamExt;
             let mut sse = SseBuffer::new();
+            let mut usage: Option<Usage> = None;
 
             while let Some(chunk_result) = stream.next().await {
                 let chunk = match chunk_result {
@@ -270,16 +271,31 @@ impl Client for OpenAIClient {
                 while let Some(sse_line) = sse.next_line() {
                     match sse_line {
                         SseLine::Done => {
-                            yield Ok(StreamEvent { delta: String::new(), done: true, usage: None });
+                            yield Ok(StreamEvent { delta: String::new(), done: true, usage: usage.clone() });
                             return;
                         }
                         SseLine::Data(json_str) => {
                             match serde_json::from_str::<ChatStreamChunk>(&json_str) {
                                 Ok(chunk) => {
+                                    // Extract usage when available (final chunk)
+                                    if let Some(ref u) = chunk.usage {
+                                        usage = Some(Usage {
+                                            prompt_tokens: u.prompt_tokens,
+                                            completion_tokens: u.completion_tokens,
+                                            total_tokens: u.total_tokens,
+                                        });
+                                    }
+
                                     if let Some(delta) = chunk.choices.first() {
                                         let delta_text = delta.delta.content.clone().unwrap_or_default();
-                                        if !delta_text.is_empty() {
-                                            yield Ok(StreamEvent { delta: delta_text, done: false, usage: None });
+                                        let done = delta.finish_reason.as_deref() == Some("stop");
+                                        
+                                        if !delta_text.is_empty() || done {
+                                            yield Ok(StreamEvent { 
+                                                delta: delta_text, 
+                                                done, 
+                                                usage: if done { usage.clone() } else { None } 
+                                            });
                                         }
                                     }
                                 }
@@ -449,6 +465,7 @@ impl Client for AnthropicClient {
 
             use futures::StreamExt;
             let mut sse = SseBuffer::new();
+            let mut usage: Option<Usage> = None;
 
             while let Some(chunk_result) = stream.next().await {
                 let chunk = match chunk_result {
@@ -464,12 +481,23 @@ impl Client for AnthropicClient {
                 while let Some(sse_line) = sse.next_line() {
                     match sse_line {
                         SseLine::Event(name) if name == "message_stop" => {
-                            yield Ok(StreamEvent { delta: String::new(), done: true, usage: None });
+                            yield Ok(StreamEvent { delta: String::new(), done: true, usage: usage.clone() });
                             return;
                         }
                         SseLine::Data(json_str) => {
                             match serde_json::from_str::<AnthropicStreamChunk>(&json_str) {
                                 Ok(chunk) => {
+                                    // Extract usage from message if available
+                                    if let Some(msg) = chunk.message {
+                                        if let Some(u) = msg.usage {
+                                            usage = Some(Usage {
+                                                prompt_tokens: u.input_tokens,
+                                                completion_tokens: u.output_tokens,
+                                                total_tokens: u.input_tokens + u.output_tokens,
+                                            });
+                                        }
+                                    }
+
                                     match chunk.type_.as_str() {
                                         "content_block_delta" => {
                                             if let Some(StreamDelta::ContentBlock(delta)) = chunk.delta {
@@ -479,7 +507,7 @@ impl Client for AnthropicClient {
                                             }
                                         }
                                         "message_stop" => {
-                                            yield Ok(StreamEvent { delta: String::new(), done: true, usage: None });
+                                            yield Ok(StreamEvent { delta: String::new(), done: true, usage: usage.clone() });
                                             return;
                                         }
                                         _ => {} // message_delta, content_block_start, etc.
@@ -543,11 +571,15 @@ struct ChatUsage {
 #[derive(Debug, Deserialize)]
 struct ChatStreamChunk {
     choices: Vec<ChatStreamChoice>,
+    #[serde(default)]
+    usage: Option<ChatUsage>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ChatStreamChoice {
     delta: ChatStreamDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

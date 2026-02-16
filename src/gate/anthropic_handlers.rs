@@ -70,7 +70,15 @@ pub async fn messages_handler(
                     match result {
                         Ok(event) => {
                             if event.done {
-                                let json = json!({"type": "message_stop", "id": id});
+                                let json = if let Some(usage) = event.usage {
+                                    json!({
+                                        "type": "message_stop",
+                                        "id": id,
+                                        "usage": {"input_tokens": usage.prompt_tokens, "output_tokens": usage.completion_tokens}
+                                    })
+                                } else {
+                                    json!({"type": "message_stop", "id": id})
+                                };
                                 Ok(Event::default().data(json.to_string()))
                             } else if !event.delta.is_empty() {
                                 let json = json!({

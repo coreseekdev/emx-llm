@@ -72,13 +72,24 @@ pub async fn chat_handler(
                     match result {
                         Ok(event) => {
                             if event.done {
-                                let json = json!({
-                                    "id": id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
-                                });
+                                let json = if let Some(usage) = event.usage {
+                                    json!({
+                                        "id": id,
+                                        "object": "chat.completion.chunk",
+                                        "created": created,
+                                        "model": model,
+                                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                                        "usage": {"prompt_tokens": usage.prompt_tokens, "completion_tokens": usage.completion_tokens, "total_tokens": usage.total_tokens}
+                                    })
+                                } else {
+                                    json!({
+                                        "id": id,
+                                        "object": "chat.completion.chunk",
+                                        "created": created,
+                                        "model": model,
+                                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                                    })
+                                };
                                 Ok(Event::default().data(json.to_string()))
                             } else if !event.delta.is_empty() {
                                 let json = json!({
