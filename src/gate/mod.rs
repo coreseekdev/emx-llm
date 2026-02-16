@@ -3,6 +3,7 @@
 //! Provides HTTP gateway functionality for aggregating multiple LLM providers.
 
 pub mod config;
+pub mod handlers;
 pub mod router;
 pub mod server;
 
