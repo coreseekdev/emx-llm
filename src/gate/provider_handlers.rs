@@ -26,27 +26,15 @@ pub async fn list_openai_models(
                 })
                 .collect();
             
-            if models_data.is_empty() {
-                Json(json!({
-                    "object": "list",
-                    "data": [
-                        {"id": "gpt-4", "object": "model", "owned_by": "openai", "permission": [], "created": 1677610602},
-                        {"id": "gpt-3.5-turbo", "object": "model", "owned_by": "openai", "permission": [], "created": 1677610602}
-                    ]
-                }))
-            } else {
-                Json(json!({
-                    "object": "list",
-                    "data": models_data
-                }))
-            }
+            Json(json!({
+                "object": "list",
+                "data": models_data
+            }))
         }
         Err(_) => {
             Json(json!({
                 "object": "list",
-                "data": [
-                    {"id": "gpt-4", "object": "model", "owned_by": "openai", "permission": [], "created": 1677610602}
-                ]
+                "data": []
             }))
         }
     }
@@ -72,26 +60,15 @@ pub async fn list_anthropic_models(
                 })
                 .collect();
             
-            if models_data.is_empty() {
-                Json(json!({
-                    "object": "list",
-                    "data": [
-                        {"id": "claude-3-opus-20240229", "object": "model", "owned_by": "anthropic", "permission": [], "created": 1677610602}
-                    ]
-                }))
-            } else {
-                Json(json!({
-                    "object": "list",
-                    "data": models_data
-                }))
-            }
+            Json(json!({
+                "object": "list",
+                "data": models_data
+            }))
         }
         Err(_) => {
             Json(json!({
                 "object": "list",
-                "data": [
-                    {"id": "claude-3-opus-20240229", "object": "model", "owned_by": "anthropic", "permission": [], "created": 1677610602}
-                ]
+                "data": []
             }))
         }
     }
