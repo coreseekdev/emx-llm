@@ -2,6 +2,7 @@
 
 use crate::gate::config::GatewayConfig;
 use crate::gate::handlers::{self, GatewayState};
+use crate::ProviderConfig;
 use axum::{
     extract::Request,
     middleware::{self, Next},
@@ -89,11 +90,17 @@ async fn shutdown_signal() {
     info!("Received shutdown signal, stopping server...");
 }
 
-/// Health check handler
+/// Health check handler with provider status
 async fn health_check() -> axum::Json<serde_json::Value> {
+    // Try to get provider count
+    let providers_count = ProviderConfig::list_models()
+        .map(|m| m.len())
+        .unwrap_or(0);
+    
     axum::Json(serde_json::json!({
         "status": "ok",
-        "timestamp": chrono::Utc::now().to_rfc3339()
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "providers": providers_count
     }))
 }
 

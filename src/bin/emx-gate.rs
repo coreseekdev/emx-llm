@@ -174,35 +174,54 @@ async fn test_config(config: &GatewayConfig) -> Result<()> {
 
     println!("Testing {} provider(s)...", models.len());
 
-    let mut all_passed = true;
-
     for (model_ref, model_config) in &models {
         print!("  Testing {} ... ", model_ref);
         
-        // Simple connectivity test - try to reach the API base
-        let url = format!("{}/models", model_config.api_base.trim_end_matches('/'));
+        // Test endpoint - /models for OpenAI, /v1/models for Anthropic
+        let url = if model_config.provider_type == emx_llm::ProviderType::OpenAI {
+            format!("{}/models", model_config.api_base.trim_end_matches('/'))
+        } else {
+            format!("{}/v1/models", model_config.api_base.trim_end_matches('/'))
+        };
         
-        match reqwest::get(&url).await {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?;
+        
+        // Use API key if available (some APIs require it)
+        let mut request = client.get(&url);
+        if !model_config.api_key.is_empty() && model_config.api_key != "mock" {
+            if model_config.provider_type == emx_llm::ProviderType::OpenAI {
+                request = request.header("Authorization", format!("Bearer {}", model_config.api_key));
+            } else {
+                request = request.header("x-api-key", &model_config.api_key);
+            }
+        }
+        
+        match request.send().await {
             Ok(resp) => {
-                if resp.status().is_success() || resp.status().as_u16() == 401 {
-                    // 401 is OK - means we can reach the API
+                if resp.status().is_success() {
                     println!("OK");
+                } else if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 {
+                    // Auth error means we can reach the API
+                    println!("OK (auth required)");
                 } else {
                     println!("HTTP {}", resp.status());
                 }
             }
             Err(e) => {
-                // Network error - might be expected if no internet
-                println!("Warning: {}", e);
+                // Network error
+                if e.is_connect() {
+                    println!("Connection failed");
+                } else if e.is_timeout() {
+                    println!("Timeout");
+                } else {
+                    println!("Error: {}", e);
+                }
             }
         }
     }
 
-    if all_passed {
-        println!("\n✓ Configuration test passed");
-    } else {
-        println!("\n⚠ Configuration test completed with warnings");
-    }
-
+    println!("\n✓ Configuration test complete");
     Ok(())
 }
