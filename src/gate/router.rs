@@ -31,6 +31,44 @@ pub fn resolve_model(model: &str, _config: &ProviderConfig) -> Result<ResolvedMo
     })
 }
 
+/// Resolve model for a specific provider type
+/// This is used when the endpoint already indicates the provider (e.g., /openai/... or /anthropic/...)
+pub fn resolve_model_for_provider(
+    model: &str,
+    provider_type: ProviderType,
+) -> Result<ResolvedModel, String> {
+    let provider_prefix = provider_type.config_key();
+
+    // Try to find a matching model in config
+    if let Ok(models) = ProviderConfig::list_models() {
+        // Look for a model that ends with the provided model name
+        for (model_ref, model_config) in &models {
+            if model_ref.ends_with(&format!(".{}", model)) || model_ref == model {
+                // Check if it matches our provider type
+                if model_ref.starts_with(&format!("{}.", provider_prefix)) {
+                    return Ok(ResolvedModel {
+                        provider_type,
+                        model_name: model_config
+                            .model
+                            .clone()
+                            .unwrap_or_else(|| model.to_string()),
+                        model_ref: model_ref.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Fall back: construct the model_ref
+    let model_name = model.split('.').last().unwrap_or(model).to_string();
+    let full_ref = format!("{}.{}", provider_prefix, model_name);
+    Ok(ResolvedModel {
+        provider_type,
+        model_name,
+        model_ref: full_ref,
+    })
+}
+
 /// Parse model reference string
 ///
 /// Supports three formats:

@@ -1,7 +1,7 @@
 //! OpenAI-compatible handlers
 
 use crate::gate::handlers::GatewayState;
-use crate::gate::router::resolve_model;
+use crate::gate::router::resolve_model_for_provider;
 use crate::message::Message;
 use crate::{create_client_for_model, ProviderType};
 use axum::{
@@ -40,16 +40,14 @@ pub async fn chat_handler(
 
     info!("OpenAI chat request for model: {} (stream: {})", model, stream);
 
-    let resolved = resolve_model(model, &state.config)
+    // For OpenAI endpoint, always use OpenAI provider type
+    let resolved = resolve_model_for_provider(model, ProviderType::OpenAI)
         .map_err(|e| {
             error!("Failed to resolve model '{}': {}", model, e);
             StatusCode::NOT_FOUND
         })?;
 
-    if resolved.provider_type != ProviderType::OpenAI {
-        error!("Model '{}' resolved to non-OpenAI provider: {:?}", model, resolved.provider_type);
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    let model_ref = resolved.model_ref;
 
     let messages_value = request
         .get("messages")
@@ -61,7 +59,7 @@ pub async fn chat_handler(
             StatusCode::BAD_REQUEST
         })?;
 
-    match create_client_for_model(model) {
+    match create_client_for_model(&model_ref) {
         Ok((client, model_id)) => {
             if stream {
                 // Streaming
