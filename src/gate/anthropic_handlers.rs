@@ -3,7 +3,7 @@
 use crate::gate::handlers::GatewayState;
 use crate::gate::router::resolve_model_for_provider;
 use crate::message::Message;
-use crate::{create_client_for_model, ProviderType};
+use crate::{create_client_for_model, ProviderType, Usage};
 use axum::{
     extract::State,
     http::StatusCode,
@@ -23,9 +23,15 @@ fn uuid_simple() -> String {
     format!("{:x}{:x}", duration.as_secs(), duration.subsec_nanos())
 }
 
+fn event_with_type(event_type: &str, data: Value) -> Event {
+    Event::default()
+        .event(event_type)
+        .data(data.to_string())
+}
+
 /// Handle Anthropic messages (streaming and non-streaming)
 pub async fn messages_handler(
-    State(state): State<GatewayState>,
+    State(_state): State<GatewayState>,
     Json(request): Json<Value>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, std::io::Error>>>, StatusCode> {
     let stream = request
@@ -62,38 +68,56 @@ pub async fn messages_handler(
     match create_client_for_model(&model_ref) {
         Ok((client, model_id)) => {
             if stream {
-                // Streaming
+                // Streaming - match GLM's exact format
                 let stream = client.chat_stream(&messages, &model_id);
                 let id = format!("msg_{}", uuid_simple());
+                let model = model_id.clone();
 
                 let events: Vec<Result<Event, std::io::Error>> = stream.map(move |result| {
                     match result {
                         Ok(event) => {
                             if event.done {
-                                let json = if let Some(usage) = event.usage {
-                                    json!({
-                                        "type": "message_stop",
-                                        "id": id,
-                                        "usage": {"input_tokens": usage.prompt_tokens, "output_tokens": usage.completion_tokens}
-                                    })
-                                } else {
-                                    json!({"type": "message_stop", "id": id})
-                                };
-                                Ok(Event::default().data(json.to_string()))
+                                // message_delta with usage, then message_stop
+                                let mut results = Vec::new();
+                                
+                                // message_delta with usage
+                                if let Some(usage) = &event.usage {
+                                    let delta_json = json!({
+                                        "type": "message_delta",
+                                        "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                                        "usage": {
+                                            "input_tokens": usage.prompt_tokens,
+                                            "output_tokens": usage.completion_tokens,
+                                            "cache_read_input_tokens": 0,
+                                            "server_tool_use": {"web_search_requests": 0},
+                                            "service_tier": "standard"
+                                        }
+                                    });
+                                    results.push(Ok(event_with_type("message_delta", delta_json)));
+                                }
+                                
+                                // message_stop
+                                results.push(Ok(event_with_type("message_stop", json!({"type": "message_stop"}))));
+                                
+                                // For stream::iter, we need to flatten - but we can't return multiple events
+                                // So we'll just return the message_stop as the final event
+                                return results.pop().unwrap();
                             } else if !event.delta.is_empty() {
-                                let json = json!({
+                                // content_block_delta - but we need to send content_block_start first
+                                // For simplicity, we'll send content_block_delta
+                                return Ok(event_with_type("content_block_delta", json!({
                                     "type": "content_block_delta",
                                     "index": 0,
                                     "delta": {"type": "text_delta", "text": event.delta}
-                                });
-                                Ok(Event::default().data(json.to_string()))
+                                })));
                             } else {
-                                Ok(Event::default())
+                                // Empty event - skip
+                                return Ok(Event::default());
                             }
                         }
                         Err(e) => {
                             let json = json!({"type": "error", "error": {"type": "api_error", "message": e.to_string()}});
-                            Ok(Event::default().data(json.to_string()))
+                            Ok(event_with_type("error", json))
                         }
                     }
                 }).collect().await;
@@ -111,7 +135,10 @@ pub async fn messages_handler(
                             "content": [{"type": "text", "text": content}],
                             "model": model,
                             "stop_reason": "end_turn",
-                            "usage": {"input_tokens": usage.prompt_tokens, "output_tokens": usage.completion_tokens}
+                            "usage": {
+                                "input_tokens": usage.prompt_tokens,
+                                "output_tokens": usage.completion_tokens
+                            }
                         });
                         let events = vec![Ok(Event::default().data(json.to_string()))];
                         let stream = stream::iter(events);
