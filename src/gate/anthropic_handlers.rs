@@ -3,7 +3,7 @@
 use crate::gate::handlers::GatewayState;
 use crate::gate::router::resolve_model_for_provider;
 use crate::message::Message;
-use crate::{create_client_for_model, ProviderType, Usage};
+use crate::{create_client_for_model, ProviderType};
 use axum::{
     extract::State,
     http::StatusCode,
@@ -70,8 +70,8 @@ pub async fn messages_handler(
             if stream {
                 // Streaming - match GLM's exact format
                 let stream = client.chat_stream(&messages, &model_id);
-                let id = format!("msg_{}", uuid_simple());
-                let model = model_id.clone();
+                let _id = format!("msg_{}", uuid_simple());
+                let _model = model_id.clone();
 
                 let events: Vec<Result<Event, std::io::Error>> = stream.map(move |result| {
                     match result {

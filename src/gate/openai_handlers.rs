@@ -25,7 +25,7 @@ fn uuid_simple() -> String {
 
 /// Handle OpenAI chat completions (streaming and non-streaming)
 pub async fn chat_handler(
-    State(state): State<GatewayState>,
+    State(_state): State<GatewayState>,
     Json(request): Json<Value>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, std::io::Error>>>, StatusCode> {
     let stream = request

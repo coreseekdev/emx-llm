@@ -115,12 +115,20 @@ pub trait Client: Send + Sync {
     /// Send a chat completion request (non-streaming)
     async fn chat(&self, messages: &[Message], model: &str) -> Result<(String, Usage)>;
 
+    /// Send a chat completion request and return the raw HTTP response.
+    /// This allows the gateway to forward the upstream response without parsing/rewriting it.
+    async fn chat_raw(&self, messages: &[Message], model: &str) -> Result<reqwest::Response>;
+
     /// Send a chat completion request with streaming
     fn chat_stream(
         &self,
         messages: &[Message],
         model: &str,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
+
+    /// Send a chat completion request and return the raw HTTP response for streaming.
+    /// This allows the gateway to forward the upstream response without parsing/rewriting it.
+    async fn chat_stream_raw(&self, messages: &[Message], model: &str) -> Result<reqwest::Response>;
 
     /// Get the API base URL
     fn api_base(&self) -> &str;
@@ -209,6 +217,34 @@ impl Client for OpenAIClient {
 
             return Ok((message.message.content.clone(), usage));
         }
+    }
+
+    async fn chat_raw(&self, messages: &[Message], model: &str) -> Result<reqwest::Response> {
+        let url = format!(
+            "{}/chat/completions",
+            self.config.api_base.trim_end_matches('/')
+        );
+        let request = ChatRequest {
+            model: model.to_string(),
+            messages: messages.to_vec(),
+            stream: false,
+        };
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .json(&request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::Api(format!("OpenAI API error ({}): {}", status, body)));
+        }
+
+        Ok(response)
     }
 
     fn chat_stream(
@@ -311,6 +347,34 @@ impl Client for OpenAIClient {
         })
     }
 
+    async fn chat_stream_raw(&self, messages: &[Message], model: &str) -> Result<reqwest::Response> {
+        let url = format!(
+            "{}/chat/completions",
+            self.config.api_base.trim_end_matches('/')
+        );
+        let request = ChatRequest {
+            model: model.to_string(),
+            messages: messages.to_vec(),
+            stream: true,
+        };
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .json(&request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::Api(format!("OpenAI API error ({}): {}", status, body)));
+        }
+
+        Ok(response)
+    }
+
     fn api_base(&self) -> &str {
         &self.config.api_base
     }
@@ -410,6 +474,43 @@ impl Client for AnthropicClient {
 
             return Ok((text, usage));
         }
+    }
+
+    async fn chat_raw(&self, messages: &[Message], model: &str) -> Result<reqwest::Response> {
+        let url = format!("{}/v1/messages", self.config.api_base.trim_end_matches('/'));
+
+        let (system, others): (Vec<_>, Vec<_>) = messages
+            .iter()
+            .partition(|m| m.role == crate::MessageRole::System);
+
+        let system_content = system.first().map(|m| m.content.clone());
+        let messages: Vec<_> = others.into_iter().cloned().collect();
+
+        let request = AnthropicMessageRequest {
+            model: model.to_string(),
+            messages,
+            system: system_content,
+            max_tokens: self.config.max_tokens(),
+            stream: None,
+        };
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("x-api-key", self.config.api_key.clone())
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::Api(format!("Anthropic API error ({}): {}", status, body)));
+        }
+
+        Ok(response)
     }
 
     fn chat_stream(
@@ -536,6 +637,43 @@ impl Client for AnthropicClient {
 
             tracing::warn!("SSE stream ended unexpectedly");
         })
+    }
+
+    async fn chat_stream_raw(&self, messages: &[Message], model: &str) -> Result<reqwest::Response> {
+        let url = format!("{}/v1/messages", self.config.api_base.trim_end_matches('/'));
+
+        let (system, others): (Vec<_>, Vec<_>) = messages
+            .iter()
+            .partition(|m| m.role == crate::MessageRole::System);
+
+        let system_content = system.first().map(|m| m.content.clone());
+        let messages: Vec<_> = others.into_iter().cloned().collect();
+
+        let request = AnthropicMessageRequest {
+            model: model.to_string(),
+            messages,
+            system: system_content,
+            max_tokens: self.config.max_tokens(),
+            stream: Some(true),
+        };
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("x-api-key", self.config.api_key.clone())
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::Api(format!("Anthropic API error ({}): {}", status, body)));
+        }
+
+        Ok(response)
     }
 
     fn api_base(&self) -> &str {

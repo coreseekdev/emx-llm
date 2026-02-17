@@ -1,14 +1,16 @@
 //! Gateway HTTP server
 
-use crate::gate::anthropic_handlers;
+use crate::gate::anthropic_handlers_v2;
 use crate::gate::config::GatewayConfig;
 use crate::gate::handlers::{self, GatewayState};
-use crate::gate::openai_handlers;
+use crate::gate::openai_handlers_v2;
 use crate::gate::provider_handlers;
+use crate::load_with_default;
 use crate::ProviderConfig;
 use axum::{
     extract::Request,
     middleware::{self, Next},
+    response::Response,
     routing::{get, post},
     Router,
 };
@@ -17,34 +19,45 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::signal;
 use tracing::info;
+use uuid::Uuid;
 
 /// Start the gateway server
 pub async fn start_server(config: GatewayConfig) -> anyhow::Result<()> {
-    // TODO: Load actual provider configuration
+    // Load provider configuration from config file
+    let provider_config = load_with_default().map_err(|e| {
+        tracing::warn!("Failed to load provider config, using default: {}", e);
+        e
+    })?;
+
+    // Create GatewayState with loaded config
     let state = GatewayState {
-        config: Arc::new(
-            serde_json::from_str::<crate::ProviderConfig>(r#"{
-                "type": "openai",
-                "api_base": "https://api.openai.com/v1",
-                "api_key": "mock",
-                "model": "gpt-4"
-            }"#)
-            .unwrap(),
-        ),
+        config: Arc::new(provider_config),
     };
+
+    // Maximum request body size (10 MB) to prevent DoS attacks
+    const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
     // Build our application with routes
     let app = Router::new()
-        // OpenAI-compatible endpoints
-        .route("/openai/v1/chat/completions", post(openai_handlers::chat_handler))
+        // OpenAI-compatible endpoints (using new passthrough handler)
+        .route(
+            "/openai/v1/chat/completions",
+            post(openai_handlers_v2::chat_handler_passthrough),
+        )
         .route("/openai/v1/models", get(provider_handlers::list_openai_models))
-        // Anthropic-compatible endpoints
-        .route("/anthropic/v1/messages", post(anthropic_handlers::messages_handler))
+        // Anthropic-compatible endpoints (using new passthrough handler)
+        .route(
+            "/anthropic/v1/messages",
+            post(anthropic_handlers_v2::messages_handler_passthrough),
+        )
         .route("/anthropic/v1/models", get(provider_handlers::list_anthropic_models))
         // Utility endpoints
         .route("/health", get(health_check))
         .route("/v1/providers", get(handlers::list_providers))
         .with_state(state)
+        // Apply request body size limit to prevent DoS
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_SIZE))
+        .layer(middleware::from_fn(request_id_middleware))
         .layer(middleware::from_fn(logging_middleware));
 
     // Create socket address
@@ -116,12 +129,42 @@ async fn logging_middleware(
     let method = req.method().clone();
     let uri = req.uri().clone();
 
+    // Extract request ID from headers (if set by previous middleware)
+    let request_id = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+
     let response = next.run(req).await;
 
     let duration = start.elapsed();
     let status = response.status();
 
-    info!("{} {} {} {:?}", method, uri, status, duration);
+    info!(
+        request_id = %request_id,
+        method = %method,
+        uri = %uri,
+        status = %status,
+        duration_ms = duration.as_millis(),
+        "{} {} {} {:?}",
+        method, uri, status, duration
+    );
 
     response
+}
+
+/// Request ID middleware - adds a unique ID to each request for tracing
+async fn request_id_middleware(
+    mut req: Request,
+    next: Next,
+) -> Response {
+    let request_id = Uuid::new_v4().to_string();
+    req.headers_mut().insert(
+        "x-request-id",
+        request_id.parse().unwrap(),
+    );
+
+    next.run(req).await
 }
