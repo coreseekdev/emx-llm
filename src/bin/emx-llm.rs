@@ -94,6 +94,10 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
 
+        /// Show token usage statistics after response
+        #[arg(long)]
+        token_stats: bool,
+
         /// Query text
         query: Vec<String>,
     },
@@ -125,6 +129,7 @@ async fn main() -> Result<()> {
             stream,
             prompts,
             dry_run,
+            token_stats,
             query,
         } => {
             // Determine provider and model from hierarchical lookup
@@ -253,6 +258,7 @@ async fn main() -> Result<()> {
             if stream {
                 let mut stream = client.chat_stream(&messages, &model_id);
                 let mut full_response = String::new();
+                let mut final_usage: Option<emx_llm::Usage> = None;
 
                 while let Some(event) = stream.next().await {
                     match event {
@@ -264,6 +270,7 @@ async fn main() -> Result<()> {
 
                             if event.done {
                                 println!();
+                                final_usage = event.usage;
                             }
                         }
                         Err(e) => {
@@ -272,9 +279,27 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+
+                if token_stats {
+                    if let Some(usage) = final_usage {
+                        println!();
+                        println!("=== Token Stats ===");
+                        println!("Prompt tokens: {}", usage.prompt_tokens);
+                        println!("Completion tokens: {}", usage.completion_tokens);
+                        println!("Total tokens: {}", usage.total_tokens);
+                    }
+                }
             } else {
-                let (response, _usage) = client.chat(&messages, &model_id).await?;
+                let (response, usage) = client.chat(&messages, &model_id).await?;
                 println!("{}", response);
+
+                if token_stats {
+                    println!();
+                    println!("=== Token Stats ===");
+                    println!("Prompt tokens: {}", usage.prompt_tokens);
+                    println!("Completion tokens: {}", usage.completion_tokens);
+                    println!("Total tokens: {}", usage.total_tokens);
+                }
             }
         }
         Commands::Test { provider } => {

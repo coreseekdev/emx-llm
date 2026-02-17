@@ -276,6 +276,9 @@ impl ProviderConfig {
     pub fn load_for_model(model_ref: &str) -> anyhow::Result<(ModelConfig, String)> {
         let parsed = ModelReference::parse(model_ref)?;
 
+        // Load TOML config for hierarchical lookup
+        let toml_value = Self::load_toml_config()?;
+
         // Set up default values
         let mut defaults = HashMap::new();
         defaults.insert(
@@ -283,6 +286,7 @@ impl ProviderConfig {
             toml::Value::String("openai".to_string()),
         );
 
+        // Build emx-config (environment variables + defaults)
         let config = ConfigBuilder::new()
             .with_prefix("EMX_LLM")
             .with_defaults(defaults)
@@ -290,9 +294,12 @@ impl ProviderConfig {
 
         // If full path provided (has provider prefix), resolve directly
         if parsed.provider_type.is_some() {
-            let model_config = Self::resolve_model_config(&config, &parsed).ok_or_else(|| {
-                anyhow::anyhow!("Model configuration not found for: {}", model_ref)
-            })?;
+            // Try to resolve from TOML-based config
+            let model_config = Self::resolve_model_config_from_toml(&toml_value, &parsed)
+                .or_else(|| Self::resolve_model_config(&config, &parsed))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Model configuration not found for: {}", model_ref)
+                })?;
             let model_id = model_config
                 .model
                 .clone()
@@ -300,8 +307,7 @@ impl ProviderConfig {
             return Ok((model_config, model_id));
         }
 
-        // Short name: load TOML once and search for matching sections
-        let toml_value = Self::load_toml_config()?;
+        // Short name: search for matching sections in TOML
         let matches = Self::find_sections_by_key(&toml_value, &parsed.model_name);
 
         match matches.len() {
@@ -349,7 +355,12 @@ impl ProviderConfig {
     /// Load TOML config file once, trying local then home directory
     fn load_toml_config() -> anyhow::Result<toml::Value> {
         let home_config = dirs::home_dir()
-            .map(|p| format!("{}/.emx/config.toml", p.display()))
+            .map(|p| {
+                let mut path = p;
+                path.push(".emx");
+                path.push("config.toml");
+                path.display().to_string()
+            })
             .unwrap_or_default();
 
         let config_sources: Vec<&str> = vec!["./config.toml", &home_config];
@@ -366,7 +377,7 @@ impl ProviderConfig {
         Ok(toml::Value::Table(toml::map::Map::new()))
     }
 
-    /// Find all sections under llm.provider that end with the given key
+    /// Find all sections under that end with the given key
     /// Returns list of full paths (e.g., ["anthropic.glm.glm-5", "openai.models.glm-5"])
     fn find_sections_by_key(toml_value: &toml::Value, key: &str) -> Vec<String> {
         let mut matches = Vec::new();
@@ -484,6 +495,165 @@ impl ProviderConfig {
             Self::try_resolve_at_level(config, &search_path, explicit_provider_type)
         {
             return Some(resolved);
+        }
+
+        None
+    }
+
+    /// Resolve model configuration from TOML config (loaded from file)
+    fn resolve_model_config_from_toml(
+        toml_value: &toml::Value,
+        model_ref: &ModelReference,
+    ) -> Option<ModelConfig> {
+        let path_parts: Vec<String> = model_ref
+            .full_path
+            .split('.')
+            .map(|s| s.to_string())
+            .collect();
+
+        let explicit_provider_type =
+            model_ref
+                .provider_type
+                .as_ref()
+                .and_then(|pt| match pt.to_lowercase().as_str() {
+                    "openai" => Some(ProviderType::OpenAI),
+                    "anthropic" => Some(ProviderType::Anthropic),
+                    _ => None,
+                });
+
+        // Try full path first
+        if path_parts.len() > 1 {
+            if let Some(resolved) =
+                Self::try_resolve_toml_at_level(toml_value, &path_parts, explicit_provider_type)
+            {
+                if resolved.model.is_some() {
+                    return Some(resolved);
+                }
+            }
+
+            // Try progressively shorter paths
+            for i in (0..path_parts.len() - 1).rev() {
+                let search_path = path_parts[..=i].to_vec();
+                if let Some(resolved) = Self::try_resolve_toml_at_level(
+                    toml_value,
+                    &search_path,
+                    explicit_provider_type,
+                ) {
+                    return Some(resolved);
+                }
+            }
+        }
+
+        // Try with just model name
+        let search_path = vec![model_ref.model_name.clone()];
+        Self::try_resolve_toml_at_level(toml_value, &search_path, explicit_provider_type)
+    }
+
+    /// Try to resolve configuration at a specific level from TOML
+    fn try_resolve_toml_at_level(
+        toml_value: &toml::Value,
+        search_path: &[String],
+        provider_type: Option<ProviderType>,
+    ) -> Option<ModelConfig> {
+        // Build the key path: llm.provider.${search_path}
+        let mut key_parts: Vec<String> = vec!["llm".to_string(), "provider".to_string()];
+        key_parts.extend(search_path.iter().cloned());
+        let _key_path = key_parts.join(".");
+
+        // Navigate to the section in TOML
+        let mut current = Some(toml_value);
+        for part in &key_parts {
+            current = current.and_then(|v| v.get(part.as_str()));
+        }
+
+        let Some(section) = current.and_then(|v| v.as_table()) else {
+            return None;
+        };
+
+        // Get provider type
+        let provider_type = provider_type.or_else(|| {
+            section
+                .get("type")
+                .and_then(|v| v.as_str())
+                .and_then(|s| match s {
+                    "openai" => Some(ProviderType::OpenAI),
+                    "anthropic" => Some(ProviderType::Anthropic),
+                    _ => None,
+                })
+        })?;
+
+        // Get api_key - search current level and up
+        let api_key = Self::find_toml_key(toml_value, &key_parts, "api_key").or_else(|| {
+            let legacy_key = match provider_type {
+                ProviderType::OpenAI => "OPENAI_API_KEY",
+                ProviderType::Anthropic => "ANTHROPIC_AUTH_TOKEN",
+            };
+            std::env::var(legacy_key).ok()
+        })?;
+
+        // Get api_base
+        let api_base = Self::find_toml_key(toml_value, &key_parts, "api_base")
+            .or_else(|| Self::find_toml_key(toml_value, &key_parts, "base_url"))
+            .or_else(|| {
+                let legacy_key = match provider_type {
+                    ProviderType::OpenAI => "OPENAI_API_BASE",
+                    ProviderType::Anthropic => "ANTHROPIC_BASE_URL",
+                };
+                std::env::var(legacy_key).ok()
+            })
+            .unwrap_or_else(|| provider_type.default_base_url().to_string());
+
+        // Get model name
+        let model = section
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        // Get max_tokens
+        let max_tokens = section
+            .get("max_tokens")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as u32);
+
+        Some(ModelConfig {
+            provider_type,
+            api_base,
+            api_key,
+            model,
+            max_tokens,
+        })
+    }
+
+    /// Find a key in TOML by searching up the hierarchy
+    fn find_toml_key(toml_value: &toml::Value, key_parts: &[String], key: &str) -> Option<String> {
+        // Try at current level
+        let mut current = Some(toml_value);
+        for part in key_parts {
+            current = current.and_then(|v| v.get(part.as_str()));
+        }
+
+        if let Some(table) = current.and_then(|v| v.as_table()) {
+            if let Some(v) = table.get(key).and_then(|v| v.as_str()) {
+                return Some(v.to_string());
+            }
+        }
+
+        // Try parent levels
+        for i in (2..key_parts.len()).rev() {
+            let mut parent_parts = key_parts[..i].to_vec();
+            parent_parts.push(key.to_string());
+            let _search_key = parent_parts.join(".");
+
+            let mut current = Some(toml_value);
+            for part in &key_parts[..i] {
+                current = current.and_then(|v| v.get(part.as_str()));
+            }
+
+            if let Some(table) = current.and_then(|v| v.as_table()) {
+                if let Some(v) = table.get(key).and_then(|v| v.as_str()) {
+                    return Some(v.to_string());
+                }
+            }
         }
 
         None

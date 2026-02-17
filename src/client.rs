@@ -487,9 +487,20 @@ impl Client for AnthropicClient {
                         SseLine::Data(json_str) => {
                             match serde_json::from_str::<AnthropicStreamChunk>(&json_str) {
                                 Ok(chunk) => {
-                                    // Extract usage from message if available
-                                    if let Some(msg) = chunk.message {
-                                        if let Some(u) = msg.usage {
+                                    // Extract usage from message if available (message_start event)
+                                    if let Some(msg) = &chunk.message {
+                                        if let Some(u) = &msg.usage {
+                                            usage = Some(Usage {
+                                                prompt_tokens: u.input_tokens,
+                                                completion_tokens: u.output_tokens,
+                                                total_tokens: u.input_tokens + u.output_tokens,
+                                            });
+                                        }
+                                    }
+
+                                    // Extract usage from message_delta event (GLM API returns usage here)
+                                    if chunk.type_ == "message_delta" {
+                                        if let Some(u) = &chunk.usage_info {
                                             usage = Some(Usage {
                                                 prompt_tokens: u.input_tokens,
                                                 completion_tokens: u.output_tokens,
@@ -500,9 +511,9 @@ impl Client for AnthropicClient {
 
                                     match chunk.type_.as_str() {
                                         "content_block_delta" => {
-                                            if let Some(StreamDelta::ContentBlock(delta)) = chunk.delta {
+                                            if let Some(StreamDelta::ContentBlock(delta)) = &chunk.delta {
                                                 if delta.type_ == "text_delta" && !delta.text.is_empty() {
-                                                    yield Ok(StreamEvent { delta: delta.text, done: false, usage: None });
+                                                    yield Ok(StreamEvent { delta: delta.text.clone(), done: false, usage: None });
                                                 }
                                             }
                                         }
@@ -629,7 +640,6 @@ struct AnthropicStreamChunk {
     #[allow(dead_code)]
     message: Option<AnthropicStreamMessage>,
     #[serde(default, rename = "usage")]
-    #[allow(dead_code)]
     usage_info: Option<AnthropicStreamUsage>,
 }
 

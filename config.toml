@@ -1,6 +1,4 @@
 # EMX-LLM Configuration for GLM models
-# Section names use "-" instead of "." to avoid TOML parsing issues
-# The "model" field specifies the actual API model name
 
 [llm.provider]
 type = "anthropic"
