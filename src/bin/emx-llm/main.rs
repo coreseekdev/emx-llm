@@ -4,6 +4,7 @@ use anyhow::Result;
 
 mod cli;
 mod chat;
+mod dev;
 mod env;
 mod test_cmd;
 
@@ -59,6 +60,9 @@ async fn main() -> Result<()> {
                 show_ctime: ctime || full || verbose,
             };
             env::run(format, include_files, include_git, include_env, meta_opts, verbose)?;
+        }
+        Commands::Dev { all, format } => {
+            dev::run(all, format)?;
         }
     }
 

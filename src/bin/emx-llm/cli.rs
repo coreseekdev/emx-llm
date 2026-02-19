@@ -91,4 +91,15 @@ pub enum Commands {
         #[arg(short, long)]
         verbose: bool,
     },
+
+    /// Detect development environment (tools, versions, profiles)
+    Dev {
+        /// Show all profiles (not just detected ones)
+        #[arg(short, long)]
+        all: bool,
+
+        /// Output format: text, json, md (default: md)
+        #[arg(long, default_value = "md")]
+        format: String,
+    },
 }
