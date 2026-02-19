@@ -1,6 +1,6 @@
 //! Test binary to capture raw upstream stream response
 
-use emx_llm::{create_client_for_model, Message, MessageRole};
+use emx_llm::{create_client_for_model, Message};
 use futures::StreamExt;
 
 #[tokio::main]
