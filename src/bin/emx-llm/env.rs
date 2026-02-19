@@ -90,8 +90,8 @@ pub fn run(
                 println!("{}", content);
             }
         }
-        "md" | _ => {
-            // Use markdown format
+        _ => {
+            // Default: markdown format
             println!("> **ENVIRONMENT CONTEXT REPORT**");
             println!("> For LLM inference context. Use `-v` for verbose output.");
             println!();
@@ -128,7 +128,7 @@ fn format_system_time(time: std::time::SystemTime) -> String {
     use std::time::UNIX_EPOCH;
     let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
     let datetime = chrono::DateTime::from_timestamp(duration.as_secs() as i64, 0)
-        .unwrap_or_else(|| chrono::Utc::now());
+        .unwrap_or_else(chrono::Utc::now);
     datetime.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
@@ -330,8 +330,8 @@ fn collect_git_info(dir: &std::path::Path) -> String {
             for line in branches.lines() {
                 let trimmed = line.trim();
                 // git branch output: "* main" or "  feature"
-                if trimmed.starts_with("* ") {
-                    git_info.push_str(&format!("  * {} (current)\n", &trimmed[2..]));
+                if let Some(branch_name) = trimmed.strip_prefix("* ") {
+                    git_info.push_str(&format!("  * {} (current)\n", branch_name));
                 } else {
                     git_info.push_str(&format!("  - {}\n", trimmed));
                 }
@@ -402,14 +402,14 @@ fn collect_git_info(dir: &std::path::Path) -> String {
                 // Format: " commit_hash path (branch)" or "-commit_hash path (branch)" (not initialized)
                 // or "+commit_hash path (branch)" (different commit)
                 let trimmed = line.trim();
-                if trimmed.starts_with('-') {
-                    git_info.push_str(&format!("  - {} (not initialized)\n", &trimmed[1..].split_whitespace().next().unwrap_or("")));
-                } else if trimmed.starts_with('+') {
-                    git_info.push_str(&format!("  ! {} (modified)\n", &trimmed[1..].split_whitespace().next().unwrap_or("")));
+                if let Some(rest) = trimmed.strip_prefix('-') {
+                    git_info.push_str(&format!("  - {} (not initialized)\n", rest.split_whitespace().next().unwrap_or("")));
+                } else if let Some(rest) = trimmed.strip_prefix('+') {
+                    git_info.push_str(&format!("  ! {} (modified)\n", rest.split_whitespace().next().unwrap_or("")));
                 } else {
                     let parts: Vec<&str> = trimmed.split_whitespace().collect();
                     if parts.len() >= 2 {
-                        git_info.push_str(&format!("  - {} ({})\n", parts[1], parts.get(0).unwrap_or(&"")));
+                        git_info.push_str(&format!("  - {} ({})\n", parts[1], parts.first().unwrap_or(&"")));
                     }
                 }
             }

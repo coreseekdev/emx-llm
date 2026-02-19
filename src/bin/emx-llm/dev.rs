@@ -206,7 +206,8 @@ pub fn run(show_all: bool, format: String) -> Result<()> {
                 println!("{}", content);
             }
         }
-        "md" | _ => {
+        _ => {
+            // Default: markdown format
             for (name, content) in &results {
                 println!("## DEV: {}", name.to_uppercase());
                 println!("{}", content);
