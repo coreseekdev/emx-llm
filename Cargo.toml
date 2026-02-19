@@ -9,7 +9,7 @@ description = "LLM client library for EMX with OpenAI and Anthropic support"
 
 [[bin]]
 name = "emx-llm"
-path = "src/bin/emx-llm.rs"
+path = "src/bin/emx-llm/main.rs"
 
 [[bin]]
 name = "emx-gate"
