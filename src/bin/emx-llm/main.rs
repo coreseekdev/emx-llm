@@ -6,7 +6,9 @@ mod cli;
 mod chat;
 mod dev;
 mod env;
+mod exec;
 mod test_cmd;
+mod tools;
 
 use clap::Parser;
 use cli::{Cli, Commands};
@@ -63,6 +65,17 @@ async fn main() -> Result<()> {
         }
         Commands::Dev { all, format } => {
             dev::run(all, format)?;
+        }
+        Commands::Tools {
+            tool_name,
+            info,
+            json,
+            params,
+        } => {
+            tools::run(tool_name, info, json, params)?;
+        }
+        Commands::Exec { script, args } => {
+            exec::run(&script, &args)?;
         }
     }
 

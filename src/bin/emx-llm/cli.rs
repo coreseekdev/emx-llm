@@ -102,4 +102,32 @@ pub enum Commands {
         #[arg(long, default_value = "md")]
         format: String,
     },
+
+    /// Manage and call TCL tools
+    Tools {
+        /// Tool name (omit to list all tools)
+        tool_name: Option<String>,
+
+        /// Subcommand: info or help (show tool metadata)
+        #[arg(short, long)]
+        info: bool,
+
+        /// Show tool metadata as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Tool parameters (for calling tools)
+        #[arg(long)]
+        params: Vec<String>,
+    },
+
+    /// Execute TCL scripts
+    Exec {
+        /// TCL script file to execute
+        script: String,
+
+        /// Script arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
