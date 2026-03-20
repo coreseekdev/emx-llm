@@ -173,16 +173,10 @@ fn get_tools_dir(tools_dir: Option<&str>) -> Result<PathBuf> {
 
 /// Quote a TCL argument for safe use in commands
 fn quote_tcl_arg(s: &str) -> String {
-    if s.is_empty() {
-        return "{}".to_string();
+    if s.is_empty() || !s.chars().any(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | ';' | '"' | '\\' | '[' | ']' | '$' | '{' | '}')) {
+        return s.to_string();
     }
-
-    let needs_bracing = s.chars().any(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | ';' | '"' | '\\' | '[' | ']' | '$' | '{' | '}'));
-    if needs_bracing {
-        format!("{{{}}}", s.replace("}", "\\}"))
-    } else {
-        s.to_string()
-    }
+    format!("{{{}}}", s.replace('}', "\\}"))
 }
 
 /// Run the tools subcommand
@@ -192,31 +186,13 @@ pub fn run(
     json: bool,
     params: Vec<String>,
 ) -> Result<()> {
-    if let Some(name) = tool_name {
-        if info {
-            let tool_info = get_tool_info(&name, None)?;
+    match (tool_name, info, params.as_slice()) {
+        // List all tools
+        (None, _, []) => {
+            let tools = list_tools(None)?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&tool_info)?);
-            } else {
-                print_tool_info(&tool_info);
-            }
-        } else if !params.is_empty() {
-            let result = call_tool(&name, &params, None)?;
-            println!("{}", result);
-        } else {
-            let tool_info = get_tool_info(&name, None)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&tool_info)?);
-            } else {
-                print_tool_info(&tool_info);
-            }
-        }
-    } else {
-        let tools = list_tools(None)?;
-        if json {
-            println!("{}", serde_json::to_string(&tools)?);
-        } else {
-            if tools.is_empty() {
+                println!("{}", serde_json::to_string(&tools)?);
+            } else if tools.is_empty() {
                 println!("No tools found in {}/ directory", DEFAULT_TOOLS_DIR);
             } else {
                 println!("Available tools:");
@@ -224,6 +200,28 @@ pub fn run(
                     println!("  - {}", tool);
                 }
             }
+        }
+        // Show tool info
+        (Some(name), true, []) | (Some(name), false, []) => {
+            let tool_info = get_tool_info(&name, None)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&tool_info)?);
+            } else {
+                print_tool_info(&tool_info);
+            }
+        }
+        // Call tool
+        (Some(name), _, [params @ ..]) => {
+            let result = call_tool(&name, params, None)?;
+            println!("{}", result);
+        }
+        // Invalid: no tool name but params provided (shouldn't happen due to clap)
+        (None, _, [_]) | (None, _, [_, _, ..]) => {
+            anyhow::bail!("Tool name is required when providing parameters");
+        }
+        // Invalid: info with params (handled by clap, but rust needs exhaustive match)
+        (Some(_), true, [_]) | (Some(_), true, [_, _, ..]) => {
+            anyhow::bail!("Cannot use --info with --params");
         }
     }
 
