@@ -1,6 +1,8 @@
 //! CLI definitions for emx-llm
 
-use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+use clap::{ArgAction, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "emx-llm")]
@@ -14,6 +16,12 @@ pub struct Cli {
 pub enum Commands {
     /// Send a chat completion request
     Chat {
+        /// Session name (without .mbox suffix)
+        session: String,
+
+        /// Prompt text, or @file path
+        prompt: Option<String>,
+
         /// Model to use (can be qualified: e.g., "anthropic.glm.glm-5", "glm-5")
         #[arg(short, long)]
         model: Option<String>,
@@ -23,12 +31,16 @@ pub enum Commands {
         api_base: Option<String>,
 
         /// Enable streaming output
-        #[arg(short, long)]
+        #[arg(long, action = ArgAction::SetTrue, conflicts_with = "no_stream")]
         stream: bool,
 
-        /// System prompt files (can be specified multiple times)
-        #[arg(long = "prompt")]
-        prompts: Vec<String>,
+        /// Disable streaming output
+        #[arg(long = "no-stream", action = ArgAction::SetTrue, conflicts_with = "stream")]
+        no_stream: bool,
+
+        /// System prompt text, or @file path (only effective for new session)
+        #[arg(short = 's', long)]
+        system: Option<String>,
 
         /// Enable dry run mode (output prompt without sending to API)
         #[arg(long)]
@@ -38,8 +50,9 @@ pub enum Commands {
         #[arg(long)]
         token_stats: bool,
 
-        /// Query text
-        query: Vec<String>,
+        /// Attach files as context (repeatable)
+        #[arg(long)]
+        attach: Vec<PathBuf>,
     },
 
     /// Test configuration and API key

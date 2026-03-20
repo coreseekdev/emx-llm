@@ -48,6 +48,7 @@ dirs = "6.0"
 # TCL scripting for tool execution
 # Note: Using local path for development, switch to git for release
 rtcl-core = { path = "G:/src.tcl/rtcl/crates/rtcl-core", features = ["rtcl_std"] }
+emx-mbox = { path = "../emx-mbox", optional = true }
 
 # CLI dependencies (optional, only for cli feature)
 clap = { version = "4", features = ["derive"], optional = true }
@@ -65,7 +66,7 @@ http-body-util = { version = "0.1", optional = true }
 [features]
 default = []
 # CLI feature - required for emx-llm binary
-cli = ["clap", "tracing-subscriber", "chrono"]
+cli = ["clap", "tracing-subscriber", "chrono", "emx-mbox"]
 # Gateway feature - required for emx-gate binary
 gate = ["cli", "uuid", "axum", "tower", "tower-http", "hyper", "http-body-util"]
 

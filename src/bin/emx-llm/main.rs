@@ -28,15 +28,29 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Chat {
+            session,
+            prompt,
             model,
             api_base,
             stream,
-            prompts,
+            no_stream,
+            system,
             dry_run,
             token_stats,
-            query,
+            attach,
         } => {
-            chat::run(model, api_base, stream, prompts, dry_run, token_stats, query)?;
+            chat::run(
+                session,
+                prompt,
+                model,
+                api_base,
+                stream,
+                no_stream,
+                system,
+                dry_run,
+                token_stats,
+                attach,
+            )?;
         }
         Commands::Test { provider } => {
             test_cmd::run(provider)?;
