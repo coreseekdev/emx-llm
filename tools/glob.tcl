@@ -32,7 +32,5 @@ proc execute {args} {
         error "Missing required parameter: pattern"
     }
 
-    set matches [glob -nocomplain -directory $path -- $pattern]
-
-    return [dict create matches $matches]
+    return [glob -nocomplain -directory $path -- $pattern]
 }

@@ -30,5 +30,5 @@ proc execute {args} {
     set content [read $fp]
     close $fp
 
-    return [dict create content $content]
+    return $content
 }

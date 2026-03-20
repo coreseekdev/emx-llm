@@ -154,8 +154,9 @@ pub fn call_tool(tool_name: &str, params: &[String], tools_dir: Option<&str>) ->
         .context("Tool script must define 'execute' command")?;
 
     // Use rtcl's built-in json::encode to convert to JSON
+    // Use 'list' schema to ensure proper array encoding
     interp.set_var("_tool_result", result)?;
-    let json_result = interp.eval("json::encode $_tool_result")?;
+    let json_result = interp.eval("json::encode $_tool_result list")?;
     Ok(json_result.as_str().to_string())
 }
 
