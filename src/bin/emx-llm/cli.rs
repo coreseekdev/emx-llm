@@ -105,10 +105,7 @@ pub enum Commands {
 
     /// Manage and call TCL tools
     Tools {
-        /// Tool name (omit to list all tools)
-        tool_name: Option<String>,
-
-        /// Subcommand: info or help (show tool metadata)
+        /// Show tool metadata (use with tool_name)
         #[arg(short, long)]
         info: bool,
 
@@ -116,9 +113,9 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
 
-        /// Tool parameters (for calling tools)
-        #[arg(long)]
-        params: Vec<String>,
+        /// Tool name and parameters (e.g., glob --pattern "*.rs" --path src)
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+        args: Vec<String>,
     },
 
     /// Execute TCL scripts

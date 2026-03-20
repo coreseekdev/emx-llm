@@ -1,6 +1,17 @@
 //! Tools subcommand - manage and call TCL tools
 
 use anyhow::{Context, Result};
+
+/// Convert an rtcl error to anyhow by stringifying it.
+///
+/// rtcl::Error contains `Value` (which uses `Rc`, not `Send+Sync`),
+/// so it cannot be stored inside `anyhow::Error` directly.  Stringifying
+/// at the boundary preserves the error message while satisfying anyhow's
+/// `Send + Sync + 'static` requirement.
+fn tcl_err(e: rtcl_core::Error) -> anyhow::Error {
+    anyhow::anyhow!("{}", e)
+}
+use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::fs;
@@ -15,7 +26,7 @@ const DEFAULT_TOOLS_DIR: &str = "tools";
 pub struct ToolInfo {
     pub name: String,
     pub description: String,
-    pub parameters: HashMap<String, ParameterInfo>,
+    pub parameters: IndexMap<String, ParameterInfo>,
     pub returns: Option<String>,
     pub example: Option<String>,
 }
@@ -62,9 +73,11 @@ pub fn get_tool_info(tool_name: &str, tools_dir: Option<&str>) -> Result<ToolInf
 
     let mut interp = Interp::new();
     interp.eval(&format!("source {{{}}}", script_path.display()))
+        .map_err(tcl_err)
         .with_context(|| format!("Failed to load tool script: {}", script_path.display()))?;
 
     let info_result = interp.eval("info")
+        .map_err(tcl_err)
         .context("Tool script must define 'info' command")?;
 
     parse_tool_info(&info_result, tool_name)
@@ -83,7 +96,7 @@ fn parse_tool_info(value: &Value, tool_name: &str) -> Result<ToolInfo> {
         .map(|v| v.as_str().to_string())
         .context("Tool must have a description")?;
 
-    let mut parameters = HashMap::new();
+    let mut parameters = IndexMap::new();
     if let Some(params_value) = dict.get("parameters") {
         if let Some(params_dict) = params_value.as_dict() {
             for (param_name, param_info) in params_dict {
@@ -132,6 +145,50 @@ fn parse_tcl_bool(s: &str) -> Option<bool> {
     }
 }
 
+/// Parse named arguments (e.g., --pattern "*.rs" --path "src/")
+/// and convert them to positional arguments based on tool parameter definitions.
+fn parse_named_args(tool_name: &str, raw_args: &[String], tools_dir: Option<&str>) -> Result<Vec<String>> {
+    let tool_info = get_tool_info(tool_name, tools_dir)?;
+
+    // Build parameter order from tool info (preserves insertion order with IndexMap)
+    let param_order: Vec<String> = tool_info.parameters.keys().cloned().collect();
+
+    // Parse raw args into key-value pairs
+    let mut parsed_args: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut i = 0;
+    while i < raw_args.len() {
+        let arg = &raw_args[i];
+        if arg.starts_with("--") {
+            let key = arg[2..].to_string();
+            if i + 1 < raw_args.len() && !raw_args[i + 1].starts_with("--") {
+                parsed_args.insert(key, raw_args[i + 1].clone());
+                i += 2;
+            } else {
+                parsed_args.insert(key, String::new());
+                i += 1;
+            }
+        } else {
+            // Positional argument - use in order
+            i += 1;
+        }
+    }
+
+    // Convert to positional args in the order defined by tool info
+    let mut positional_args: Vec<String> = Vec::new();
+    for param_name in &param_order {
+        if let Some(value) = parsed_args.get(param_name) {
+            positional_args.push(value.clone());
+        } else if let Some(param_info) = tool_info.parameters.get(param_name) {
+            if param_info.required {
+                anyhow::bail!("Missing required parameter: --{}", param_name);
+            }
+            // Optional parameter not provided - skip
+        }
+    }
+
+    Ok(positional_args)
+}
+
 /// Call a tool with parameters
 pub fn call_tool(tool_name: &str, params: &[String], tools_dir: Option<&str>) -> Result<String> {
     let tools_dir = get_tools_dir(tools_dir)?;
@@ -143,6 +200,7 @@ pub fn call_tool(tool_name: &str, params: &[String], tools_dir: Option<&str>) ->
 
     let mut interp = Interp::new();
     interp.eval(&format!("source {{{}}}", script_path.display()))
+        .map_err(tcl_err)
         .with_context(|| format!("Failed to load tool script: {}", script_path.display()))?;
 
     let mut cmd = format!("execute");
@@ -151,13 +209,25 @@ pub fn call_tool(tool_name: &str, params: &[String], tools_dir: Option<&str>) ->
     }
 
     let result = interp.eval(&cmd)
+        .map_err(tcl_err)
         .context("Tool script must define 'execute' command")?;
 
-    // Use rtcl's built-in json::encode to convert to JSON
-    // Use 'list' schema to ensure proper array encoding
-    interp.set_var("_tool_result", result)?;
-    let json_result = interp.eval("json::encode $_tool_result list")?;
-    Ok(json_result.as_str().to_string())
+    // Determine output format based on result type
+    // For strings: return raw content (not JSON-encoded)
+    // For dicts/lists: use JSON encoding
+    match result.type_name() {
+        "dict" | "list" => {
+            // Use JSON encoding for complex types
+            interp.set_var("_tool_result", result.clone()).map_err(tcl_err)?;
+            let schema = if result.type_name() == "dict" { "obj" } else { "list" };
+            let json_result = interp.eval(&format!("json::encode $_tool_result {}", schema)).map_err(tcl_err)?;
+            Ok(json_result.as_str().to_string())
+        }
+        _ => {
+            // For strings and primitives, return raw content
+            Ok(result.as_str().to_string())
+        }
+    }
 }
 
 /// Get tools directory path
@@ -182,14 +252,19 @@ fn quote_tcl_arg(s: &str) -> String {
 
 /// Run the tools subcommand
 pub fn run(
-    tool_name: Option<String>,
     info: bool,
     json: bool,
-    params: Vec<String>,
+    args: Vec<String>,
 ) -> Result<()> {
-    match (tool_name, info, params.as_slice()) {
+    // Parse tool name from args
+    let tool_name = args.first().map(|s| s.as_str());
+
+    // Extract tool parameters (everything after the tool name)
+    let tool_params: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
+
+    match (tool_name, info, tool_params.is_empty()) {
         // List all tools
-        (None, _, []) => {
+        (None, _, true) => {
             let tools = list_tools(None)?;
             if json {
                 println!("{}", serde_json::to_string(&tools)?);
@@ -203,8 +278,8 @@ pub fn run(
             }
         }
         // Show tool info
-        (Some(name), true, []) | (Some(name), false, []) => {
-            let tool_info = get_tool_info(&name, None)?;
+        (Some(name), _, true) => {
+            let tool_info = get_tool_info(name, None)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&tool_info)?);
             } else {
@@ -212,17 +287,14 @@ pub fn run(
             }
         }
         // Call tool
-        (Some(name), _, [params @ ..]) => {
-            let result = call_tool(&name, params, None)?;
+        (Some(name), _, false) => {
+            let positional_args = parse_named_args(name, tool_params, None)?;
+            let result = call_tool(name, &positional_args, None)?;
             println!("{}", result);
         }
-        // Invalid: no tool name but params provided (shouldn't happen due to clap)
-        (None, _, [_]) | (None, _, [_, _, ..]) => {
+        // Invalid: no tool name but params provided
+        (None, _, false) => {
             anyhow::bail!("Tool name is required when providing parameters");
-        }
-        // Invalid: info with params (handled by clap, but rust needs exhaustive match)
-        (Some(_), true, [_]) | (Some(_), true, [_, _, ..]) => {
-            anyhow::bail!("Cannot use --info with --params");
         }
     }
 

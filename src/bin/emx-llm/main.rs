@@ -67,12 +67,11 @@ async fn main() -> Result<()> {
             dev::run(all, format)?;
         }
         Commands::Tools {
-            tool_name,
             info,
             json,
-            params,
+            args,
         } => {
-            tools::run(tool_name, info, json, params)?;
+            tools::run(info, json, args)?;
         }
         Commands::Exec { script, args } => {
             exec::run(&script, &args)?;
