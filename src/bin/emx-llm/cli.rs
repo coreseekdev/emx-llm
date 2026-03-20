@@ -53,6 +53,14 @@ pub enum Commands {
         /// Attach files as context (repeatable)
         #[arg(long)]
         attach: Vec<PathBuf>,
+
+        /// Tools directory for TCL tool scripts (enables /tool commands in prompt)
+        #[arg(long)]
+        tools: Option<PathBuf>,
+
+        /// Show raw API response (for debugging tool calls)
+        #[arg(long)]
+        raw: bool,
     },
 
     /// Test configuration and API key

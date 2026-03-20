@@ -38,6 +38,8 @@ async fn main() -> Result<()> {
             dry_run,
             token_stats,
             attach,
+            tools,
+            raw,
         } => {
             chat::run(
                 session,
@@ -50,6 +52,8 @@ async fn main() -> Result<()> {
                 dry_run,
                 token_stats,
                 attach,
+                tools,
+                raw,
             )?;
         }
         Commands::Test { provider } => {

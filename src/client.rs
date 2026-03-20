@@ -1,6 +1,6 @@
 //! LLM client implementations
 
-use super::{config::ProviderConfig, message::Message, Error, Result, Usage};
+use super::{config::ProviderConfig, message::{Message, ToolCall}, Error, Result, Usage};
 use futures::stream::Stream;
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,23 @@ fn retry_delay(attempt: u32) -> Duration {
     // Exponential backoff: 1s, 2s, 4s
     let base_secs = 1u64 << attempt.min(4); // Cap at 16s base
     Duration::from_secs(base_secs)
+}
+
+fn normalize_outbound_messages(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .map(|message| match message.role {
+            crate::MessageRole::Tool => {
+                // For tool messages, convert to user message with content
+                if let Some(content) = message.get_content() {
+                    Message::user(format!("[Tool Output]\n{}", content))
+                } else {
+                    message.clone()
+                }
+            }
+            _ => message.clone(),
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -107,6 +124,9 @@ pub struct StreamEvent {
 
     /// Token usage (only available in the final event)
     pub usage: Option<Usage>,
+
+    /// Tool calls (when assistant requests tool execution)
+    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 /// Trait for LLM clients
@@ -162,9 +182,10 @@ impl Client for OpenAIClient {
             self.config.api_base.trim_end_matches('/')
         );
 
+        let normalized_messages = normalize_outbound_messages(messages);
         let request = ChatRequest {
             model: model.to_string(),
-            messages: messages.to_vec(),
+            messages: normalized_messages,
             stream: false,
         };
 
@@ -224,9 +245,10 @@ impl Client for OpenAIClient {
             "{}/chat/completions",
             self.config.api_base.trim_end_matches('/')
         );
+        let normalized_messages = normalize_outbound_messages(messages);
         let request = ChatRequest {
             model: model.to_string(),
-            messages: messages.to_vec(),
+            messages: normalized_messages,
             stream: false,
         };
 
@@ -256,9 +278,10 @@ impl Client for OpenAIClient {
             "{}/chat/completions",
             self.config.api_base.trim_end_matches('/')
         );
+        let normalized_messages = normalize_outbound_messages(messages);
         let request = ChatRequest {
             model: model.to_string(),
-            messages: messages.to_vec(),
+            messages: normalized_messages,
             stream: true,
         };
 
@@ -307,7 +330,7 @@ impl Client for OpenAIClient {
                 while let Some(sse_line) = sse.next_line() {
                     match sse_line {
                         SseLine::Done => {
-                            yield Ok(StreamEvent { delta: String::new(), done: true, usage: usage.clone() });
+                            yield Ok(StreamEvent { tool_calls: None, delta: String::new(), done: true, usage: usage.clone() });
                             return;
                         }
                         SseLine::Data(json_str) => {
@@ -327,7 +350,7 @@ impl Client for OpenAIClient {
                                         let done = delta.finish_reason.as_deref() == Some("stop");
                                         
                                         if !delta_text.is_empty() || done {
-                                            yield Ok(StreamEvent { 
+                                            yield Ok(StreamEvent { tool_calls: None, 
                                                 delta: delta_text, 
                                                 done, 
                                                 usage: if done { usage.clone() } else { None } 
@@ -352,9 +375,10 @@ impl Client for OpenAIClient {
             "{}/chat/completions",
             self.config.api_base.trim_end_matches('/')
         );
+        let normalized_messages = normalize_outbound_messages(messages);
         let request = ChatRequest {
             model: model.to_string(),
-            messages: messages.to_vec(),
+            messages: normalized_messages,
             stream: true,
         };
 
@@ -407,11 +431,12 @@ impl Client for AnthropicClient {
         let url = format!("{}/v1/messages", self.config.api_base.trim_end_matches('/'));
 
         // Extract system message if present
-        let (system, others): (Vec<_>, Vec<_>) = messages
+        let normalized_messages = normalize_outbound_messages(messages);
+        let (system, others): (Vec<_>, Vec<_>) = normalized_messages
             .iter()
             .partition(|m| m.role == crate::MessageRole::System);
 
-        let system_content = system.first().map(|m| m.content.clone());
+        let system_content = system.first().and_then(|m| m.get_content().map(|s| s.to_string()));
         let messages: Vec<_> = others.into_iter().cloned().collect();
 
         let request = AnthropicMessageRequest {
@@ -479,11 +504,12 @@ impl Client for AnthropicClient {
     async fn chat_raw(&self, messages: &[Message], model: &str) -> Result<reqwest::Response> {
         let url = format!("{}/v1/messages", self.config.api_base.trim_end_matches('/'));
 
-        let (system, others): (Vec<_>, Vec<_>) = messages
+        let normalized_messages = normalize_outbound_messages(messages);
+        let (system, others): (Vec<_>, Vec<_>) = normalized_messages
             .iter()
             .partition(|m| m.role == crate::MessageRole::System);
 
-        let system_content = system.first().map(|m| m.content.clone());
+        let system_content = system.first().and_then(|m| m.get_content().map(|s| s.to_string()));
         let messages: Vec<_> = others.into_iter().cloned().collect();
 
         let request = AnthropicMessageRequest {
@@ -520,11 +546,12 @@ impl Client for AnthropicClient {
     ) -> Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>> {
         let url = format!("{}/v1/messages", self.config.api_base.trim_end_matches('/'));
 
-        let (system, others): (Vec<_>, Vec<_>) = messages
+        let normalized_messages = normalize_outbound_messages(messages);
+        let (system, others): (Vec<_>, Vec<_>) = normalized_messages
             .iter()
             .partition(|m| m.role == crate::MessageRole::System);
 
-        let system_content = system.first().map(|m| m.content.clone());
+        let system_content = system.first().and_then(|m| m.get_content().map(|s| s.to_string()));
         let messages: Vec<_> = others.into_iter().cloned().collect();
 
         let request = AnthropicMessageRequest {
@@ -582,7 +609,7 @@ impl Client for AnthropicClient {
                 while let Some(sse_line) = sse.next_line() {
                     match sse_line {
                         SseLine::Event(name) if name == "message_stop" => {
-                            yield Ok(StreamEvent { delta: String::new(), done: true, usage: usage.clone() });
+                            yield Ok(StreamEvent { tool_calls: None, delta: String::new(), done: true, usage: usage.clone() });
                             return;
                         }
                         SseLine::Data(json_str) => {
@@ -614,12 +641,12 @@ impl Client for AnthropicClient {
                                         "content_block_delta" => {
                                             if let Some(StreamDelta::ContentBlock(delta)) = &chunk.delta {
                                                 if delta.type_ == "text_delta" && !delta.text.is_empty() {
-                                                    yield Ok(StreamEvent { delta: delta.text.clone(), done: false, usage: None });
+                                                    yield Ok(StreamEvent { tool_calls: None, delta: delta.text.clone(), done: false, usage: None });
                                                 }
                                             }
                                         }
                                         "message_stop" => {
-                                            yield Ok(StreamEvent { delta: String::new(), done: true, usage: usage.clone() });
+                                            yield Ok(StreamEvent { tool_calls: None, delta: String::new(), done: true, usage: usage.clone() });
                                             return;
                                         }
                                         _ => {} // message_delta, content_block_start, etc.
@@ -642,11 +669,12 @@ impl Client for AnthropicClient {
     async fn chat_stream_raw(&self, messages: &[Message], model: &str) -> Result<reqwest::Response> {
         let url = format!("{}/v1/messages", self.config.api_base.trim_end_matches('/'));
 
-        let (system, others): (Vec<_>, Vec<_>) = messages
+        let normalized_messages = normalize_outbound_messages(messages);
+        let (system, others): (Vec<_>, Vec<_>) = normalized_messages
             .iter()
             .partition(|m| m.role == crate::MessageRole::System);
 
-        let system_content = system.first().map(|m| m.content.clone());
+        let system_content = system.first().and_then(|m| m.get_content().map(|s| s.to_string()));
         let messages: Vec<_> = others.into_iter().cloned().collect();
 
         let request = AnthropicMessageRequest {
@@ -886,14 +914,14 @@ mod tests {
     fn test_message_role_system() {
         let msg = Message::system("You are helpful");
         assert_eq!(msg.role, MessageRole::System);
-        assert_eq!(msg.content, "You are helpful");
+        assert_eq!(msg.get_content(), Some("You are helpful"));
     }
 
     #[test]
     fn test_message_role_user() {
         let msg = Message::user("Hello");
         assert_eq!(msg.role, MessageRole::User);
-        assert_eq!(msg.content, "Hello");
+        assert_eq!(msg.get_content(), Some("Hello"));
     }
 
     #[test]

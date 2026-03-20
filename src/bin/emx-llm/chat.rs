@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
-use emx_llm::{create_client, create_client_for_model, load_with_default, ProviderConfig, Session, Usage};
+use emx_llm::{create_client, create_client_for_model, load_with_default, ProviderConfig, Session, Usage, ToolCall};
 use futures::StreamExt;
 
 /// Run the chat command
@@ -21,6 +21,8 @@ pub fn run(
     dry_run: bool,
     token_stats: bool,
     attach: Vec<PathBuf>,
+    tools_dir: Option<PathBuf>,
+    raw: bool,
 ) -> Result<()> {
     tokio::runtime::Runtime::new()?.block_on(async {
         run_async(
@@ -34,6 +36,8 @@ pub fn run(
             dry_run,
             token_stats,
             attach,
+            tools_dir,
+            raw,
         )
         .await
     })
@@ -51,6 +55,8 @@ async fn run_async(
     dry_run: bool,
     token_stats: bool,
     attach: Vec<PathBuf>,
+    tools_dir: Option<PathBuf>,
+    raw: bool,
 ) -> Result<()> {
     let (client, model_id) = resolve_client(model.as_deref(), api_base.as_deref())?;
 
@@ -80,9 +86,10 @@ async fn run_async(
         println!("Messages:");
         for msg in &messages {
             match msg.role {
-                emx_llm::MessageRole::System => println!("  [System]: {}", msg.content),
-                emx_llm::MessageRole::User => println!("  [User]: {}", msg.content),
-                emx_llm::MessageRole::Assistant => println!("  [Assistant]: {}", msg.content),
+                emx_llm::MessageRole::System => println!("  [System]: {}", msg.get_content().unwrap_or("")),
+                emx_llm::MessageRole::User => println!("  [User]: {}", msg.get_content().unwrap_or("")),
+                emx_llm::MessageRole::Assistant => println!("  [Assistant]: {}", msg.get_content().unwrap_or("")),
+                emx_llm::MessageRole::Tool => println!("  [Tool]: {}", msg.get_content().unwrap_or("")),
             }
         }
         println!();
@@ -90,10 +97,9 @@ async fn run_async(
         return Ok(());
     }
 
-    let messages = session
-        .add_user_message(prompt_text, &attach)?
-        .to_vec();
+    session.add_user_message(prompt_text, &attach)?;
 
+    let messages = session.messages().to_vec();
     let use_stream = stream || !no_stream;
 
     if use_stream {
@@ -111,7 +117,6 @@ async fn run_async(
                     full_response.push_str(&event.delta);
 
                     if event.done {
-                        println!();
                         final_usage = event.usage;
                     }
                 }
@@ -221,4 +226,66 @@ fn resolve_input_value(value: &str) -> Result<String> {
         return Ok(std::fs::read_to_string(path)?);
     }
     Ok(value.to_string())
+}
+
+/// Execute tool calls by calling TCL scripts
+fn execute_tool_call(tool_call: &ToolCall, tools_dir: Option<&PathBuf>) -> Result<String> {
+    let tools_dir = tools_dir.as_ref().map(|p| p.as_path()).unwrap_or_else(|| {
+        std::path::Path::new("tools")
+    });
+
+    let script_path = tools_dir.join(format!("{}.tcl", tool_call.name));
+
+    if !script_path.exists() {
+        return Err(anyhow!("Tool not found: {}", tool_call.name));
+    }
+
+    // Parse arguments from JSON
+    let args_json: serde_json::Value = serde_json::from_str(&tool_call.arguments)
+        .map_err(|e| anyhow!("Failed to parse tool arguments: {}", e))?;
+
+    // Convert JSON object to named arguments
+    let mut tcl_args = Vec::new();
+    if let Some(obj) = args_json.as_object() {
+        for (key, value) in obj {
+            let value_str = match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                _ => serde_json::to_string(value)?,
+            };
+            tcl_args.push(format!("--{}", key));
+            tcl_args.push(value_str);
+        }
+    }
+
+    // Build TCL command
+    let mut cmd = format!("source {{{}}}\n", script_path.display());
+    cmd.push_str(&format!("execute"));
+
+    // Convert named args to positional args based on tool info
+    // For now, just pass the args in order they were provided
+    for arg in &tcl_args {
+        cmd.push_str(&format!(" {}", quote_tcl_arg(arg)));
+    }
+
+    // Use rtcl to execute
+    use rtcl_core::{Interp, Value};
+
+    let mut interp = Interp::new();
+    interp.eval(&cmd)
+        .map_err(|e| anyhow!("Tool execution failed: {}", e))?;
+
+    let result = interp.eval("set __result")
+        .map_err(|e| anyhow!("Failed to get tool result: {}", e))?;
+
+    Ok(result.as_str().to_string())
+}
+
+/// Quote a TCL argument for safe use in commands
+fn quote_tcl_arg(s: &str) -> String {
+    if s.is_empty() || !s.chars().any(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | ';' | '"' | '\\' | '[' | ']' | '$' | '{' | '}')) {
+        return s.to_string();
+    }
+    format!("{{{}}}", s.replace('}', "\\}"))
 }

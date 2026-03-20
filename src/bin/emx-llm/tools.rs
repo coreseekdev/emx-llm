@@ -12,7 +12,6 @@ fn tcl_err(e: rtcl_core::Error) -> anyhow::Error {
     anyhow::anyhow!("{}", e)
 }
 use indexmap::IndexMap;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::fs;
 use rtcl_core::{Interp, Value};

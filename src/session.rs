@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Result};
 use emx_mbox::{MailMessage, MailStore, Mbox, MessageBuilder};
 
-use crate::{Message, MessageRole, Usage};
+use crate::{Message, MessageContent, MessageRole, ToolCall, Usage};
 
 const SYSTEM_PREFIX: &str = "system";
 const USER_PREFIX: &str = "user";
@@ -31,10 +31,10 @@ pub fn role_from_mail(msg: &MailMessage) -> MessageRole {
     match parse_from_address(msg) {
         FromInfo::System => MessageRole::System,
         FromInfo::User => MessageRole::User,
-        FromInfo::Tool
-        | FromInfo::Assistant { .. }
-        | FromInfo::Agent { .. }
-        | FromInfo::Unknown => MessageRole::Assistant,
+        FromInfo::Tool => MessageRole::Tool,
+        FromInfo::Assistant { .. } | FromInfo::Agent { .. } | FromInfo::Unknown => {
+            MessageRole::Assistant
+        }
     }
 }
 
@@ -208,9 +208,22 @@ impl Session {
         let messages = mbox
             .messages()
             .iter()
-            .map(|mail| Message {
-                role: role_from_mail(mail),
-                content: message_content_from_mail(mail),
+            .map(|mail| {
+                let content_text = message_content_from_mail(mail);
+
+                // Parse tool call ID from header
+                let tool_call_id = mail.header("X-LLM-Tool-Call-Id").map(|s| s.to_string());
+
+                // Parse tool calls from header
+                let tool_calls = mail.header("X-LLM-Tool-Calls")
+                    .and_then(|s| serde_json::from_str::<Vec<crate::ToolCall>>(s).ok());
+
+                Message {
+                    role: role_from_mail(mail),
+                    content: MessageContent::Text(content_text),
+                    tool_call_id,
+                    tool_calls,
+                }
             })
             .collect();
 
@@ -254,16 +267,22 @@ impl Session {
     ) -> Result<()> {
         let domain = get_domain();
 
+        // Get the text content for the message body
+        let content_text = msg.get_content().unwrap_or("").to_string();
+
         let mut builder = match msg.role {
             MessageRole::System => {
-                MessageBuilder::new(format!("{}@{}", SYSTEM_PREFIX, domain), "").body(msg.content.clone())
+                MessageBuilder::new(format!("{}@{}", SYSTEM_PREFIX, domain), "").body(content_text.clone())
             }
             MessageRole::User => {
-                MessageBuilder::new(format!("{}@{}", USER_PREFIX, domain), "").body(msg.content.clone())
+                MessageBuilder::new(format!("{}@{}", USER_PREFIX, domain), "").body(content_text.clone())
             }
             MessageRole::Assistant => {
                 let model_name = model.unwrap_or("assistant");
-                MessageBuilder::new(format!("{}@{}", model_name, domain), "").body(msg.content.clone())
+                MessageBuilder::new(format!("{}@{}", model_name, domain), "").body(content_text.clone())
+            }
+            MessageRole::Tool => {
+                MessageBuilder::new(format!("{}@{}", TOOL_PREFIX, domain), "").body(content_text.clone())
             }
         };
 
@@ -279,6 +298,18 @@ impl Session {
 
         if let Some(duration_ms) = duration_ms {
             builder = builder.extra_header("X-LLM-Duration-Ms", duration_ms.to_string());
+        }
+
+        // Store tool call ID if present
+        if let Some(tool_call_id) = &msg.tool_call_id {
+            builder = builder.extra_header("X-LLM-Tool-Call-Id", tool_call_id.clone());
+        }
+
+        // Store tool calls if present
+        if let Some(tool_calls) = &msg.tool_calls {
+            let tool_calls_json = serde_json::to_string(tool_calls)
+                .map_err(|e| anyhow!("Failed to serialize tool calls: {}", e))?;
+            builder = builder.extra_header("X-LLM-Tool-Calls", tool_calls_json);
         }
 
         let mail = builder.build();
@@ -317,6 +348,39 @@ impl Session {
     ) -> Result<()> {
         let message = Message::assistant(content);
         self.append(&message, Some(model), Some(usage), duration_ms)?;
+        self.history.push(message);
+        Ok(())
+    }
+
+    pub fn add_tool_message(&mut self, content: String) -> Result<()> {
+        let message = Message::tool(content);
+        self.append(&message, None, None, None)?;
+        self.history.push(message);
+        Ok(())
+    }
+
+    /// Add an assistant message with tool calls
+    pub fn add_assistant_tool_calls(
+        &mut self,
+        tool_calls: Vec<ToolCall>,
+        model: &str,
+        usage: &Usage,
+        duration_ms: Option<u128>,
+    ) -> Result<()> {
+        let message = Message::assistant_with_tools(tool_calls);
+        self.append(&message, Some(model), Some(usage), duration_ms)?;
+        self.history.push(message);
+        Ok(())
+    }
+
+    /// Add a tool result message
+    pub fn add_tool_result(
+        &mut self,
+        tool_call_id: String,
+        result: String,
+    ) -> Result<()> {
+        let message = Message::tool_result(tool_call_id, result);
+        self.append(&message, None, None, None)?;
         self.history.push(message);
         Ok(())
     }
