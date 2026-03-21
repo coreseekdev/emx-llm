@@ -1,6 +1,6 @@
 //! Chat command implementation
 
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -280,6 +280,20 @@ fn resolve_prompt(prompt: Option<String>) -> Result<String> {
     match prompt {
         Some(value) => resolve_input_value(&value),
         None => {
+            // Check if stdin is a terminal (TTY). If so, user didn't provide input.
+            if io::stdin().is_terminal() {
+                return Err(anyhow!(
+                    "prompt is required\n\n\
+                     Usage: emx-llm chat <SESSION> [PROMPT]\n\
+                       SESSION  - Session name\n\
+                       PROMPT   - Prompt text (optional)\n\
+                     \n\
+                     Provide prompt as argument or via stdin:\n\
+                       emx-llm chat my-session \"Hello\"\n\
+                       echo \"Hello\" | emx-llm chat my-session"
+                ));
+            }
+            // Stdin is piped/redirected, read from it
             let stdin = io::stdin();
             let mut buffer = String::new();
             stdin.lock().read_to_string(&mut buffer)?;
