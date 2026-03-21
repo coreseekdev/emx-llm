@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
-use emx_llm::{create_client, create_client_for_model, load_with_default, load_tools_from_dir, ProviderConfig, Session, Usage, ToolCall};
+use emx_llm::{create_client, create_client_for_model, load_with_default, load_tools_from_dir, validate_session_name, ProviderConfig, Session, Usage, ToolCall};
 use futures::StreamExt;
 
 /// Run the chat command
@@ -24,6 +24,16 @@ pub async fn run(
     tools_dir: Option<PathBuf>,
     raw: bool,
 ) -> Result<()> {
+    // Step 1: Validate session name is safe (before creating any files)
+    validate_session_name(&session_name)?;
+
+    // Step 2: Resolve and validate prompt (before creating any files)
+    let prompt_text = resolve_prompt(prompt)?;
+    if prompt_text.trim().is_empty() {
+        return Err(anyhow!("prompt is empty; provide PROMPT or stdin content"));
+    }
+
+    // Step 3: Now that prompt is validated, create the session
     let (client, model_id) = resolve_client(model.as_deref(), api_base.as_deref())?;
 
     let mut session = Session::open(&session_name)?;
@@ -33,11 +43,6 @@ pub async fn run(
     };
 
     session.ensure_system_prompt(system_prompt.as_deref())?;
-
-    let prompt_text = resolve_prompt(prompt)?;
-    if prompt_text.trim().is_empty() {
-        return Err(anyhow!("prompt is empty; provide PROMPT or stdin content"));
-    }
 
     if dry_run {
         let messages = session.preview_user_message(prompt_text, &attach)?;

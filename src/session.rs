@@ -141,6 +141,50 @@ fn build_user_mail(content: &str, attachments: &[PathBuf], domain: &str) -> Resu
     Ok(builder.build())
 }
 
+/// Validate session name is safe for use as a filename
+/// Checks for unsafe characters that could cause issues
+pub fn validate_session_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        return Err(anyhow!("session name cannot be empty"));
+    }
+
+    // Check for unsafe filename characters
+    // Windows: < > : " / \ | ? *
+    // Unix: / (plus we avoid . for hidden files and leading/trailing dots/spaces)
+    let unsafe_chars = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+    for &ch in &unsafe_chars {
+        if name.contains(ch) {
+            return Err(anyhow!(
+                "session name contains unsafe character '{}': '{}'",
+                ch, name
+            ));
+        }
+    }
+
+    // Avoid names starting with dot (hidden files on Unix)
+    if name.starts_with('.') {
+        return Err(anyhow!(
+            "session name cannot start with a dot: '{}'",
+            name
+        ));
+    }
+
+    // Avoid names that are just dots (like "." or "..")
+    if name == "." || name == ".." {
+        return Err(anyhow!("session name cannot be '.' or '..'"));
+    }
+
+    // Avoid control characters
+    if name.chars().any(|c| c.is_ascii_control()) {
+        return Err(anyhow!(
+            "session name contains control characters: '{}'",
+            name
+        ));
+    }
+
+    Ok(())
+}
+
 pub struct Session {
     name: String,
     path: PathBuf,
@@ -150,12 +194,8 @@ pub struct Session {
 
 impl Session {
     pub fn open(name: &str) -> Result<Self> {
-        if name.trim().is_empty() {
-            return Err(anyhow!("session name is required"));
-        }
-        if name.contains(['/', '\\']) {
-            return Err(anyhow!("session name must not contain path separators"));
-        }
+        // Validate session name (defensive check, also validated in chat.rs)
+        validate_session_name(name)?;
 
         let session_dir = Self::get_session_dir();
         fs::create_dir_all(&session_dir)?;

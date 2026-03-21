@@ -39,4 +39,4 @@ pub use config::{load_with_default, ModelConfig, ModelReference, ProviderConfig,
 pub use message::{Message, MessageContent, MessageRole, ToolCall, Usage};
 pub use provider::{create_client, create_client_for_model};
 #[cfg(feature = "cli")]
-pub use session::{FromInfo, Session};
+pub use session::{FromInfo, Session, validate_session_name};
