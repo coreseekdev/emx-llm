@@ -3,7 +3,7 @@
 use crate::gate::handlers::GatewayState;
 use crate::gate::router::resolve_model_for_provider;
 use crate::message::Message;
-use crate::{create_client_for_model, ProviderType};
+use crate::{create_client_for_model, ProviderType, ToolDefinition};
 use axum::{
     extract::State,
     http::StatusCode,
@@ -59,11 +59,17 @@ pub async fn chat_handler(
             StatusCode::BAD_REQUEST
         })?;
 
+    // Extract tools from request if present
+    let tools: Option<Vec<ToolDefinition>> = request
+        .get("tools")
+        .and_then(|t| serde_json::from_value(t.clone()).ok());
+    let tools_ref = tools.as_deref();
+
     match create_client_for_model(&model_ref) {
         Ok((client, model_id)) => {
             if stream {
                 // Streaming
-                let stream = client.chat_stream(&messages, &model_id);
+                let stream = client.chat_stream(&messages, &model_id, tools_ref);
                 let model = model.to_string();
                 let created = chrono::Utc::now().timestamp();
                 let id = format!("chatcmpl-{}", uuid_simple());
@@ -115,14 +121,30 @@ pub async fn chat_handler(
                 Ok(Sse::new(Box::pin(stream)))
             } else {
                 // Non-streaming
-                match client.chat(&messages, &model_id).await {
-                    Ok((content, usage)) => {
+                match client.chat(&messages, &model_id, tools_ref).await {
+                    Ok((content, tool_calls, usage)) => {
+                        let finish_reason = if tool_calls.is_some() { "tool_calls" } else { "stop" };
+                        let mut message_json = json!({
+                            "role": "assistant",
+                            "content": content
+                        });
+                        if let Some(ref calls) = tool_calls {
+                            let tc_json: Vec<serde_json::Value> = calls.iter().map(|tc| json!({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": tc.arguments
+                                }
+                            })).collect();
+                            message_json["tool_calls"] = json!(tc_json);
+                        }
                         let json = json!({
                             "id": format!("chatcmpl-{}", uuid_simple()),
                             "object": "chat.completion",
                             "created": chrono::Utc::now().timestamp(),
                             "model": model,
-                            "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+                            "choices": [{"index": 0, "message": message_json, "finish_reason": finish_reason}],
                             "usage": {"prompt_tokens": usage.prompt_tokens, "completion_tokens": usage.completion_tokens, "total_tokens": usage.total_tokens}
                         });
                         let events = vec![Ok(Event::default().data(json.to_string()))];

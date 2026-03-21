@@ -3,7 +3,7 @@
 use crate::gate::handlers::GatewayState;
 use crate::gate::router::resolve_model_for_provider;
 use crate::message::Message;
-use crate::{create_client_for_model, ProviderType};
+use crate::{create_client_for_model, ProviderType, ToolDefinition};
 use axum::{
     extract::State,
     http::StatusCode,
@@ -65,11 +65,17 @@ pub async fn messages_handler(
             StatusCode::BAD_REQUEST
         })?;
 
+    // Extract tools from request if present
+    let tools: Option<Vec<ToolDefinition>> = request
+        .get("tools")
+        .and_then(|t| serde_json::from_value(t.clone()).ok());
+    let tools_ref = tools.as_deref();
+
     match create_client_for_model(&model_ref) {
         Ok((client, model_id)) => {
             if stream {
                 // Streaming - match GLM's exact format
-                let stream = client.chat_stream(&messages, &model_id);
+                let stream = client.chat_stream(&messages, &model_id, tools_ref);
                 let _id = format!("msg_{}", uuid_simple());
                 let _model = model_id.clone();
 
@@ -126,15 +132,32 @@ pub async fn messages_handler(
                 Ok(Sse::new(Box::pin(stream)))
             } else {
                 // Non-streaming
-                match client.chat(&messages, &model_id).await {
-                    Ok((content, usage)) => {
+                match client.chat(&messages, &model_id, tools_ref).await {
+                    Ok((content, tool_calls, usage)) => {
+                        // Build content blocks
+                        let mut content_blocks: Vec<serde_json::Value> = Vec::new();
+                        if !content.is_empty() {
+                            content_blocks.push(json!({"type": "text", "text": content}));
+                        }
+                        if let Some(ref calls) = tool_calls {
+                            for tc in calls {
+                                let input: serde_json::Value = serde_json::from_str(&tc.arguments).unwrap_or(json!({}));
+                                content_blocks.push(json!({
+                                    "type": "tool_use",
+                                    "id": tc.id,
+                                    "name": tc.name,
+                                    "input": input
+                                }));
+                            }
+                        }
+                        let stop_reason = if tool_calls.is_some() { "tool_use" } else { "end_turn" };
                         let json = json!({
                             "id": format!("msg_{}", uuid_simple()),
                             "type": "message",
                             "role": "assistant",
-                            "content": [{"type": "text", "text": content}],
+                            "content": content_blocks,
                             "model": model,
-                            "stop_reason": "end_turn",
+                            "stop_reason": stop_reason,
                             "usage": {
                                 "input_tokens": usage.prompt_tokens,
                                 "output_tokens": usage.completion_tokens

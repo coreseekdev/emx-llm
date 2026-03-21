@@ -2,7 +2,7 @@
 
 use super::router::resolve_model;
 use crate::message::Message;
-use crate::{create_client_for_model, ProviderConfig, ProviderType};
+use crate::{create_client_for_model, ProviderConfig, ProviderType, ToolDefinition};
 use axum::{
     extract::State,
     http::StatusCode,
@@ -104,12 +104,36 @@ pub async fn openai_chat_handler(
             StatusCode::BAD_REQUEST
         })?;
 
+    // Extract tools from request if present
+    let tools: Option<Vec<ToolDefinition>> = request
+        .get("tools")
+        .and_then(|t| serde_json::from_value(t.clone()).ok());
+    let tools_ref = tools.as_deref();
+
     // Try to create client and call the API
     match create_client_for_model(model) {
         Ok((client, model_id)) => {
             // Call the actual API
-            match client.chat(&messages, &model_id).await {
-                Ok((content, usage)) => {
+            match client.chat(&messages, &model_id, tools_ref).await {
+                Ok((content, tool_calls, usage)) => {
+                    // Build choices with tool_calls if present
+                    let finish_reason = if tool_calls.is_some() { "tool_calls" } else { "stop" };
+                    let mut message_json = json!({
+                        "role": "assistant",
+                        "content": content
+                    });
+                    if let Some(ref calls) = tool_calls {
+                        let tc_json: Vec<serde_json::Value> = calls.iter().map(|tc| json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": tc.arguments
+                            }
+                        })).collect();
+                        message_json["tool_calls"] = json!(tc_json);
+                    }
+
                     // Convert response to OpenAI format
                     Ok(Json(json!({
                         "id": format!("chatcmpl-{}", uuid_simple()),
@@ -118,11 +142,8 @@ pub async fn openai_chat_handler(
                         "model": model,
                         "choices": [{
                             "index": 0,
-                            "message": {
-                                "role": "assistant",
-                                "content": content
-                            },
-                            "finish_reason": "stop"
+                            "message": message_json,
+                            "finish_reason": finish_reason
                         }],
                         "usage": {
                             "prompt_tokens": usage.prompt_tokens,
@@ -199,9 +220,15 @@ pub async fn openai_chat_stream_handler(
             StatusCode::BAD_REQUEST
         })?;
 
+    // Extract tools from request if present
+    let tools: Option<Vec<ToolDefinition>> = request
+        .get("tools")
+        .and_then(|t| serde_json::from_value(t.clone()).ok());
+    let tools_ref = tools.as_deref();
+
     match create_client_for_model(model) {
         Ok((client, model_id)) => {
-            let stream = client.chat_stream(&messages, &model_id);
+            let stream = client.chat_stream(&messages, &model_id, tools_ref);
             let model = model.to_string();
             let created = chrono::Utc::now().timestamp();
             let id = format!("chatcmpl-{}", uuid_simple());
@@ -210,38 +237,41 @@ pub async fn openai_chat_stream_handler(
                 match result {
                     Ok(event) => {
                         if event.done {
-                            // Include usage in final chunk if available
-                            let json = if let Some(usage) = event.usage {
-                                json!({
-                                    "id": id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [{
-                                        "index": 0,
-                                        "delta": {},
-                                        "finish_reason": "stop"
-                                    }],
-                                    "usage": {
-                                        "prompt_tokens": usage.prompt_tokens,
-                                        "completion_tokens": usage.completion_tokens,
-                                        "total_tokens": usage.total_tokens
+                            let finish_reason = if event.tool_calls.is_some() { "tool_calls" } else { "stop" };
+                            // Build tool_calls delta if present
+                            let mut delta = json!({});
+                            if let Some(ref calls) = event.tool_calls {
+                                let tc_json: Vec<serde_json::Value> = calls.iter().enumerate().map(|(i, tc)| json!({
+                                    "index": i,
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.name,
+                                        "arguments": tc.arguments
                                     }
-                                })
-                            } else {
-                                json!({
-                                    "id": id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [{
-                                        "index": 0,
-                                        "delta": {},
-                                        "finish_reason": "stop"
-                                    }]
-                                })
-                            };
-                            Ok(Event::default().data(json.to_string()))
+                                })).collect();
+                                delta["tool_calls"] = json!(tc_json);
+                            }
+                            // Include usage in final chunk if available
+                            let mut chunk = json!({
+                                "id": id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": delta,
+                                    "finish_reason": finish_reason
+                                }]
+                            });
+                            if let Some(usage) = event.usage {
+                                chunk["usage"] = json!({
+                                    "prompt_tokens": usage.prompt_tokens,
+                                    "completion_tokens": usage.completion_tokens,
+                                    "total_tokens": usage.total_tokens
+                                });
+                            }
+                            Ok(Event::default().data(chunk.to_string()))
                         } else if !event.delta.is_empty() {
                             let json = json!({
                                 "id": id,
@@ -336,20 +366,40 @@ pub async fn anthropic_messages_handler(
         }
     };
 
+    // Extract tools from request if present
+    let tools: Option<Vec<ToolDefinition>> = request
+        .get("tools")
+        .and_then(|t| serde_json::from_value(t.clone()).ok());
+    let tools_ref = tools.as_deref();
+
     match create_client_for_model(model) {
         Ok((client, model_id)) => {
-            match client.chat(&messages, &model_id).await {
-                Ok((content, usage)) => {
+            match client.chat(&messages, &model_id, tools_ref).await {
+                Ok((content, tool_calls, usage)) => {
+                    // Build content blocks
+                    let mut content_blocks: Vec<serde_json::Value> = Vec::new();
+                    if !content.is_empty() {
+                        content_blocks.push(json!({"type": "text", "text": content}));
+                    }
+                    if let Some(ref calls) = tool_calls {
+                        for tc in calls {
+                            let input: serde_json::Value = serde_json::from_str(&tc.arguments).unwrap_or(json!({}));
+                            content_blocks.push(json!({
+                                "type": "tool_use",
+                                "id": tc.id,
+                                "name": tc.name,
+                                "input": input
+                            }));
+                        }
+                    }
+                    let stop_reason = if tool_calls.is_some() { "tool_use" } else { "end_turn" };
                     Ok(Json(json!({
                         "id": format!("msg_{}", uuid_simple()),
                         "type": "message",
                         "role": "assistant",
-                        "content": [{
-                            "type": "text",
-                            "text": content
-                        }],
+                        "content": content_blocks,
                         "model": model,
-                        "stop_reason": "end_turn",
+                        "stop_reason": stop_reason,
                         "usage": {
                             "input_tokens": usage.prompt_tokens,
                             "output_tokens": usage.completion_tokens

@@ -3,7 +3,7 @@
 use crate::gate::handlers::GatewayState;
 use crate::gate::router::resolve_model_for_provider;
 use crate::message::Message;
-use crate::{create_client_for_model, ProviderType};
+use crate::{create_client_for_model, ProviderType, ToolDefinition};
 use axum::{
     body::Body,
     extract::State,
@@ -48,11 +48,17 @@ pub async fn chat_handler_passthrough(
         StatusCode::BAD_REQUEST
     })?;
 
+    // Extract tools from request if present
+    let tools: Option<Vec<ToolDefinition>> = request
+        .get("tools")
+        .and_then(|t| serde_json::from_value(t.clone()).ok());
+    let tools_ref = tools.as_deref();
+
     match create_client_for_model(&model_ref) {
         Ok((client, model_id)) => {
             if stream {
                 // Streaming with raw passthrough
-                match client.chat_stream_raw(&messages, &model_id).await {
+                match client.chat_stream_raw(&messages, &model_id, tools_ref).await {
                     Ok(upstream_response) => {
                         // Forward the upstream response body stream directly
                         let upstream_body = upstream_response.bytes_stream();
@@ -93,7 +99,7 @@ pub async fn chat_handler_passthrough(
                 }
             } else {
                 // Non-streaming with raw passthrough
-                match client.chat_raw(&messages, &model_id).await {
+                match client.chat_raw(&messages, &model_id, tools_ref).await {
                     Ok(upstream_response) => {
                         // Get the response body bytes
                         let body_bytes = upstream_response.bytes().await.map_err(|e| {
