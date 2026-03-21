@@ -165,7 +165,7 @@ impl Session {
         let system_prompt = history
             .iter()
             .find(|msg| msg.role == MessageRole::System)
-            .map(|msg| msg.content.clone());
+            .and_then(|msg| msg.get_content().map(|s| s.to_string()));
 
         Ok(Self {
             name: name.to_string(),

@@ -4,8 +4,200 @@ use super::{config::ProviderConfig, message::{Message, ToolCall}, Error, Result,
 use futures::stream::Stream;
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::pin::Pin;
 use std::time::Duration;
+
+/// Tool definition for function calling
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    /// Tool name
+    pub name: String,
+    /// Tool description
+    pub description: String,
+    /// Tool parameters (JSON Schema format)
+    pub parameters: serde_json::Value,
+}
+
+impl ToolDefinition {
+    /// Create a new tool definition
+    pub fn new(name: String, description: String, parameters: serde_json::Value) -> Self {
+        Self { name, description, parameters }
+    }
+
+    /// Convert to OpenAI tool definition format
+    fn to_openai(&self) -> OpenAIToolDefinition {
+        OpenAIToolDefinition {
+            tool_type: "function".to_string(),
+            function: OpenAIFunctionDefinition {
+                name: self.name.clone(),
+                description: self.description.clone(),
+                parameters: self.parameters.clone(),
+            },
+        }
+    }
+
+    /// Convert to Anthropic tool definition format
+    fn to_anthropic(&self) -> AnthropicToolDefinition {
+        AnthropicToolDefinition {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            input_schema: self.parameters.clone(),
+        }
+    }
+}
+
+/// Load tool definitions from a directory (TCL scripts with metadata)
+pub fn load_tools_from_dir(tools_dir: Option<&std::path::Path>) -> Result<Vec<ToolDefinition>> {
+    let tools_dir = tools_dir.map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("tools"));
+
+    if !tools_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut tools = Vec::new();
+
+    for entry in std::fs::read_dir(&tools_dir)
+        .map_err(|e| Error::Api(format!("Failed to read tools directory: {}", e)))?
+    {
+        let entry = entry.map_err(|e| Error::Api(format!("Failed to read directory entry: {}", e)))?;
+        let path = entry.path();
+
+        if path.extension().and_then(|s| s.to_str()) != Some("tcl") {
+            continue;
+        }
+
+        let _tool_name = path.file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| Error::Api(format!("Invalid tool filename: {:?}", path)))?;
+
+        // Load tool info using rtcl
+        let tool_info = load_tool_info(&path)?;
+
+        // Build JSON Schema for parameters
+        let mut properties = serde_json::Map::new();
+        let mut required = Vec::new();
+
+        for (param_name, param_info) in &tool_info.parameters {
+            let param_schema = match param_info.param_type.as_str() {
+                "string" => json!({"type": "string", "description": param_info.description}),
+                "integer" | "int" => json!({"type": "integer", "description": param_info.description}),
+                "number" | "float" => json!({"type": "number", "description": param_info.description}),
+                "boolean" | "bool" => json!({"type": "boolean", "description": param_info.description}),
+                "array" | "list" => json!({"type": "array", "items": {"type": "string"}, "description": param_info.description}),
+                _ => json!({"type": "string", "description": param_info.description}),
+            };
+
+            properties.insert(param_name.clone(), param_schema);
+
+            if param_info.required {
+                required.push(param_name.clone());
+            }
+        }
+
+        let parameters = if properties.is_empty() {
+            json!({"type": "object", "properties": {}, "additionalProperties": false})
+        } else {
+            json!({
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": false
+            })
+        };
+
+        tools.push(ToolDefinition::new(
+            tool_info.name,
+            tool_info.description,
+            parameters,
+        ));
+    }
+
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(tools)
+}
+
+/// Tool metadata extracted from TCL script
+#[derive(Debug, Clone)]
+struct TclToolInfo {
+    name: String,
+    description: String,
+    parameters: Vec<(String, TclParamInfo)>,
+}
+
+#[derive(Debug, Clone)]
+struct TclParamInfo {
+    param_type: String,
+    required: bool,
+    description: String,
+}
+
+/// Load tool info from a TCL script
+fn load_tool_info(script_path: &std::path::Path) -> Result<TclToolInfo> {
+    let mut interp = rtcl_core::Interp::new();
+    interp.eval(&format!("source {{{}}}", script_path.display()))
+        .map_err(|e| Error::Api(format!("Failed to load tool script: {}", e)))?;
+
+    let info_result = interp.eval("info")
+        .map_err(|e| Error::Api(format!("Tool script must define 'info' command: {}", e)))?;
+
+    parse_tcl_tool_info(&info_result, script_path)
+}
+
+/// Parse tool info from TCL dict value
+fn parse_tcl_tool_info(value: &rtcl_core::Value, script_path: &std::path::Path) -> Result<TclToolInfo> {
+    let dict = value.as_dict()
+        .ok_or_else(|| Error::Api("info command must return a dict".to_string()))?;
+
+    let tool_name = script_path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let name = dict.get("name")
+        .map(|v| v.as_str().to_string())
+        .unwrap_or_else(|| tool_name.clone());
+
+    let description = dict.get("description")
+        .map(|v| v.as_str().to_string())
+        .ok_or_else(|| Error::Api("Tool must have a description".to_string()))?;
+
+    let mut parameters = Vec::new();
+    if let Some(params_value) = dict.get("parameters") {
+        if let Some(params_dict) = params_value.as_dict() {
+            for (param_name, param_info) in params_dict {
+                if let Some(info_dict) = param_info.as_dict() {
+                    let param_type = info_dict.get("type")
+                        .map(|v| v.as_str().to_string())
+                        .unwrap_or_else(|| "string".to_string());
+                    let required = info_dict.get("required")
+                        .and_then(|v| parse_tcl_bool(v.as_str()))
+                        .unwrap_or(false);
+                    let description = info_dict.get("description")
+                        .map(|v| v.as_str().to_string())
+                        .unwrap_or_else(|| String::new());
+
+                    parameters.push((param_name.clone(), TclParamInfo {
+                        param_type,
+                        required,
+                        description,
+                    }));
+                }
+            }
+        }
+    }
+
+    Ok(TclToolInfo { name, description, parameters })
+}
+
+/// Parse a TCL boolean string
+fn parse_tcl_bool(s: &str) -> Option<bool> {
+    match s.to_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
 
 /// Maximum retry attempts for rate-limited requests (HTTP 429)
 const MAX_RETRIES: u32 = 3;
@@ -30,11 +222,17 @@ fn normalize_outbound_messages(messages: &[Message]) -> Vec<Message> {
         .iter()
         .map(|message| match message.role {
             crate::MessageRole::Tool => {
-                // For tool messages, convert to user message with content
-                if let Some(content) = message.get_content() {
-                    Message::user(format!("[Tool Output]\n{}", content))
-                } else {
+                // If tool message has a tool_call_id, keep it as-is for proper
+                // tool result handling by the upstream API
+                if message.tool_call_id.is_some() {
                     message.clone()
+                } else {
+                    // Legacy tool messages without ID: convert to user message
+                    if let Some(content) = message.get_content() {
+                        Message::user(format!("[Tool Output]\n{}", content))
+                    } else {
+                        message.clone()
+                    }
                 }
             }
             _ => message.clone(),
@@ -133,22 +331,24 @@ pub struct StreamEvent {
 #[async_trait::async_trait]
 pub trait Client: Send + Sync {
     /// Send a chat completion request (non-streaming)
-    async fn chat(&self, messages: &[Message], model: &str) -> Result<(String, Usage)>;
+    /// Returns (response_content, tool_calls, usage)
+    async fn chat(&self, messages: &[Message], model: &str, tools: Option<&[ToolDefinition]>) -> Result<(String, Option<Vec<ToolCall>>, Usage)>;
 
     /// Send a chat completion request and return the raw HTTP response.
     /// This allows the gateway to forward the upstream response without parsing/rewriting it.
-    async fn chat_raw(&self, messages: &[Message], model: &str) -> Result<reqwest::Response>;
+    async fn chat_raw(&self, messages: &[Message], model: &str, tools: Option<&[ToolDefinition]>) -> Result<reqwest::Response>;
 
     /// Send a chat completion request with streaming
     fn chat_stream(
         &self,
         messages: &[Message],
         model: &str,
+        tools: Option<&[ToolDefinition]>,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
 
     /// Send a chat completion request and return the raw HTTP response for streaming.
     /// This allows the gateway to forward the upstream response without parsing/rewriting it.
-    async fn chat_stream_raw(&self, messages: &[Message], model: &str) -> Result<reqwest::Response>;
+    async fn chat_stream_raw(&self, messages: &[Message], model: &str, tools: Option<&[ToolDefinition]>) -> Result<reqwest::Response>;
 
     /// Get the API base URL
     fn api_base(&self) -> &str;
@@ -176,17 +376,19 @@ impl OpenAIClient {
 
 #[async_trait::async_trait]
 impl Client for OpenAIClient {
-    async fn chat(&self, messages: &[Message], model: &str) -> Result<(String, Usage)> {
+    async fn chat(&self, messages: &[Message], model: &str, tools: Option<&[ToolDefinition]>) -> Result<(String, Option<Vec<ToolCall>>, Usage)> {
         let url = format!(
             "{}/chat/completions",
             self.config.api_base.trim_end_matches('/')
         );
 
         let normalized_messages = normalize_outbound_messages(messages);
+        let tools_request = tools.map(|t| t.iter().map(|tool| tool.to_openai()).collect());
         let request = ChatRequest {
             model: model.to_string(),
             messages: normalized_messages,
             stream: false,
+            tools: tools_request,
         };
 
         // Retry loop for rate limiting (HTTP 429)
@@ -225,7 +427,7 @@ impl Client for OpenAIClient {
 
             let response: ChatResponse = serde_json::from_str(&body)
                 .map_err(|e| Error::Api(format!("Failed to parse OpenAI response: {}. Body: {}", e, body)))?;
-            let message = response
+            let choice = response
                 .choices
                 .first()
                 .ok_or_else(|| Error::Api("No choices in OpenAI response".to_string()))?;
@@ -236,20 +438,35 @@ impl Client for OpenAIClient {
                 total_tokens: response.usage.total_tokens,
             };
 
-            return Ok((message.message.content.clone(), usage));
+            // Parse tool calls if present
+            let tool_calls = if !choice.message.tool_calls.is_empty() {
+                Some(
+                    choice.message.tool_calls.iter().map(|tc| ToolCall {
+                        id: tc.id.clone(),
+                        name: tc.function.name.clone(),
+                        arguments: tc.function.arguments.clone(),
+                    }).collect()
+                )
+            } else {
+                None
+            };
+
+            return Ok((choice.message.content.clone(), tool_calls, usage));
         }
     }
 
-    async fn chat_raw(&self, messages: &[Message], model: &str) -> Result<reqwest::Response> {
+    async fn chat_raw(&self, messages: &[Message], model: &str, tools: Option<&[ToolDefinition]>) -> Result<reqwest::Response> {
         let url = format!(
             "{}/chat/completions",
             self.config.api_base.trim_end_matches('/')
         );
         let normalized_messages = normalize_outbound_messages(messages);
+        let tools_request = tools.map(|t| t.iter().map(|tool| tool.to_openai()).collect());
         let request = ChatRequest {
             model: model.to_string(),
             messages: normalized_messages,
             stream: false,
+            tools: tools_request,
         };
 
         let response = self
@@ -273,16 +490,19 @@ impl Client for OpenAIClient {
         &self,
         messages: &[Message],
         model: &str,
+        tools: Option<&[ToolDefinition]>,
     ) -> Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>> {
         let url = format!(
             "{}/chat/completions",
             self.config.api_base.trim_end_matches('/')
         );
         let normalized_messages = normalize_outbound_messages(messages);
+        let tools_request = tools.map(|t| t.iter().map(|tool| tool.to_openai()).collect());
         let request = ChatRequest {
             model: model.to_string(),
             messages: normalized_messages,
             stream: true,
+            tools: tools_request,
         };
 
         let api_key = self.config.api_key.clone();
@@ -316,6 +536,9 @@ impl Client for OpenAIClient {
             let mut sse = SseBuffer::new();
             let mut usage: Option<Usage> = None;
 
+            // Track accumulated tool calls
+            let mut accumulated_tools: std::collections::HashMap<i32, ToolCall> = std::collections::HashMap::new();
+
             while let Some(chunk_result) = stream.next().await {
                 let chunk = match chunk_result {
                     Ok(c) => c,
@@ -330,7 +553,23 @@ impl Client for OpenAIClient {
                 while let Some(sse_line) = sse.next_line() {
                     match sse_line {
                         SseLine::Done => {
-                            yield Ok(StreamEvent { tool_calls: None, delta: String::new(), done: true, usage: usage.clone() });
+                            // Yield any accumulated tool calls at the end
+                            if !accumulated_tools.is_empty() {
+                                let tool_calls: Vec<ToolCall> = accumulated_tools.values().cloned().collect();
+                                yield Ok(StreamEvent {
+                                    tool_calls: Some(tool_calls),
+                                    delta: String::new(),
+                                    done: true,
+                                    usage: usage.clone(),
+                                });
+                            } else {
+                                yield Ok(StreamEvent {
+                                    tool_calls: None,
+                                    delta: String::new(),
+                                    done: true,
+                                    usage: usage.clone(),
+                                });
+                            }
                             return;
                         }
                         SseLine::Data(json_str) => {
@@ -347,13 +586,55 @@ impl Client for OpenAIClient {
 
                                     if let Some(delta) = chunk.choices.first() {
                                         let delta_text = delta.delta.content.clone().unwrap_or_default();
-                                        let done = delta.finish_reason.as_deref() == Some("stop");
-                                        
-                                        if !delta_text.is_empty() || done {
-                                            yield Ok(StreamEvent { tool_calls: None, 
-                                                delta: delta_text, 
-                                                done, 
-                                                usage: if done { usage.clone() } else { None } 
+                                        let done = delta.finish_reason.as_deref() == Some("stop") ||
+                                                  delta.finish_reason.as_deref() == Some("tool_calls");
+
+                                        // Process tool calls
+                                        for tc in &delta.delta.tool_calls {
+                                            let entry = accumulated_tools.entry(tc.index).or_insert_with(|| ToolCall {
+                                                id: tc.tool_id.clone().unwrap_or_default(),
+                                                name: String::new(),
+                                                arguments: String::new(),
+                                            });
+
+                                            if let Some(ref id) = tc.tool_id {
+                                                entry.id = id.clone();
+                                            }
+                                            if let Some(ref func) = tc.function {
+                                                if let Some(ref name) = func.function_name {
+                                                    entry.name = name.clone();
+                                                }
+                                                if let Some(ref args) = func.function_arguments {
+                                                    entry.arguments.push_str(args);
+                                                }
+                                            }
+                                        }
+
+                                        // Yield text delta if present
+                                        if !delta_text.is_empty() {
+                                            yield Ok(StreamEvent {
+                                                tool_calls: None,
+                                                delta: delta_text,
+                                                done: false,
+                                                usage: None,
+                                            });
+                                        }
+
+                                        // Yield tool calls if done
+                                        if done && !accumulated_tools.is_empty() {
+                                            let tool_calls: Vec<ToolCall> = accumulated_tools.values().cloned().collect();
+                                            yield Ok(StreamEvent {
+                                                tool_calls: Some(tool_calls),
+                                                delta: String::new(),
+                                                done: true,
+                                                usage: usage.clone(),
+                                            });
+                                        } else if done {
+                                            yield Ok(StreamEvent {
+                                                tool_calls: None,
+                                                delta: String::new(),
+                                                done: true,
+                                                usage: usage.clone(),
                                             });
                                         }
                                     }
@@ -370,16 +651,18 @@ impl Client for OpenAIClient {
         })
     }
 
-    async fn chat_stream_raw(&self, messages: &[Message], model: &str) -> Result<reqwest::Response> {
+    async fn chat_stream_raw(&self, messages: &[Message], model: &str, tools: Option<&[ToolDefinition]>) -> Result<reqwest::Response> {
         let url = format!(
             "{}/chat/completions",
             self.config.api_base.trim_end_matches('/')
         );
         let normalized_messages = normalize_outbound_messages(messages);
+        let tools_request = tools.map(|t| t.iter().map(|tool| tool.to_openai()).collect());
         let request = ChatRequest {
             model: model.to_string(),
             messages: normalized_messages,
             stream: true,
+            tools: tools_request,
         };
 
         let response = self
@@ -427,7 +710,7 @@ impl AnthropicClient {
 
 #[async_trait::async_trait]
 impl Client for AnthropicClient {
-    async fn chat(&self, messages: &[Message], model: &str) -> Result<(String, Usage)> {
+    async fn chat(&self, messages: &[Message], model: &str, tools: Option<&[ToolDefinition]>) -> Result<(String, Option<Vec<ToolCall>>, Usage)> {
         let url = format!("{}/v1/messages", self.config.api_base.trim_end_matches('/'));
 
         // Extract system message if present
@@ -439,12 +722,14 @@ impl Client for AnthropicClient {
         let system_content = system.first().and_then(|m| m.get_content().map(|s| s.to_string()));
         let messages: Vec<_> = others.into_iter().cloned().collect();
 
+        let tools_request = tools.map(|t| t.iter().map(|tool| tool.to_anthropic()).collect());
         let request = AnthropicMessageRequest {
             model: model.to_string(),
             messages: messages.clone(),
             system: system_content,
             max_tokens: self.config.max_tokens(),
             stream: None, // No streaming for regular chat
+            tools: tools_request,
         };
 
         // Retry loop for rate limiting (HTTP 429)
@@ -491,17 +776,33 @@ impl Client for AnthropicClient {
                 total_tokens: response.usage.input_tokens + response.usage.output_tokens,
             };
 
-            let text = response
-                .content
-                .first()
-                .map(|block| block.text.clone())
-                .ok_or_else(|| Error::Api("Anthropic response contained no content blocks".to_string()))?;
+            // Parse content blocks to extract text and tool calls
+            let mut text_parts = Vec::new();
+            let mut tool_calls = Vec::new();
 
-            return Ok((text, usage));
+            for block in &response.content {
+                match block {
+                    AnthropicContentBlock::Text { text } => {
+                        text_parts.push(text.clone());
+                    }
+                    AnthropicContentBlock::ToolUse { id, name, input } => {
+                        tool_calls.push(ToolCall {
+                            id: id.clone(),
+                            name: name.clone(),
+                            arguments: serde_json::to_string(input)
+                                .unwrap_or_else(|_| String::new()),
+                        });
+                    }
+                }
+            }
+
+            let text = text_parts.join("\n");
+
+            return Ok((text, if tool_calls.is_empty() { None } else { Some(tool_calls) }, usage));
         }
     }
 
-    async fn chat_raw(&self, messages: &[Message], model: &str) -> Result<reqwest::Response> {
+    async fn chat_raw(&self, messages: &[Message], model: &str, tools: Option<&[ToolDefinition]>) -> Result<reqwest::Response> {
         let url = format!("{}/v1/messages", self.config.api_base.trim_end_matches('/'));
 
         let normalized_messages = normalize_outbound_messages(messages);
@@ -512,12 +813,14 @@ impl Client for AnthropicClient {
         let system_content = system.first().and_then(|m| m.get_content().map(|s| s.to_string()));
         let messages: Vec<_> = others.into_iter().cloned().collect();
 
+        let tools_request = tools.map(|t| t.iter().map(|tool| tool.to_anthropic()).collect());
         let request = AnthropicMessageRequest {
             model: model.to_string(),
             messages,
             system: system_content,
             max_tokens: self.config.max_tokens(),
             stream: None,
+            tools: tools_request,
         };
 
         let response = self
@@ -543,6 +846,7 @@ impl Client for AnthropicClient {
         &self,
         messages: &[Message],
         model: &str,
+        tools: Option<&[ToolDefinition]>,
     ) -> Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>> {
         let url = format!("{}/v1/messages", self.config.api_base.trim_end_matches('/'));
 
@@ -554,12 +858,14 @@ impl Client for AnthropicClient {
         let system_content = system.first().and_then(|m| m.get_content().map(|s| s.to_string()));
         let messages: Vec<_> = others.into_iter().cloned().collect();
 
+        let tools_request = tools.map(|t| t.iter().map(|tool| tool.to_anthropic()).collect());
         let request = AnthropicMessageRequest {
             model: model.to_string(),
             messages,
             system: system_content,
             max_tokens: self.config.max_tokens(),
             stream: Some(true),
+            tools: tools_request,
         };
 
         let api_key = self.config.api_key.clone();
@@ -595,6 +901,9 @@ impl Client for AnthropicClient {
             let mut sse = SseBuffer::new();
             let mut usage: Option<Usage> = None;
 
+            // Track accumulated tool calls for streaming
+            let mut tool_blocks: std::collections::HashMap<u32, ToolCall> = std::collections::HashMap::new();
+
             while let Some(chunk_result) = stream.next().await {
                 let chunk = match chunk_result {
                     Ok(c) => c,
@@ -609,7 +918,15 @@ impl Client for AnthropicClient {
                 while let Some(sse_line) = sse.next_line() {
                     match sse_line {
                         SseLine::Event(name) if name == "message_stop" => {
-                            yield Ok(StreamEvent { tool_calls: None, delta: String::new(), done: true, usage: usage.clone() });
+                            // Yield accumulated tool calls if any
+                            let tool_calls = if !tool_blocks.is_empty() {
+                                let mut calls: Vec<(u32, ToolCall)> = tool_blocks.drain().collect();
+                                calls.sort_by_key(|(idx, _)| *idx);
+                                Some(calls.into_iter().map(|(_, tc)| tc).collect())
+                            } else {
+                                None
+                            };
+                            yield Ok(StreamEvent { tool_calls, delta: String::new(), done: true, usage: usage.clone() });
                             return;
                         }
                         SseLine::Data(json_str) => {
@@ -638,18 +955,46 @@ impl Client for AnthropicClient {
                                     }
 
                                     match chunk.type_.as_str() {
+                                        "content_block_start" => {
+                                            // Start of a new content block — may be text or tool_use
+                                            if let Some(AnthropicStreamContentBlock::ToolUse { id, name, .. }) = &chunk.content_block {
+                                                tool_blocks.insert(chunk.index, ToolCall {
+                                                    id: id.clone(),
+                                                    name: name.clone(),
+                                                    arguments: String::new(),
+                                                });
+                                            }
+                                        }
                                         "content_block_delta" => {
                                             if let Some(StreamDelta::ContentBlock(delta)) = &chunk.delta {
-                                                if delta.type_ == "text_delta" && !delta.text.is_empty() {
-                                                    yield Ok(StreamEvent { tool_calls: None, delta: delta.text.clone(), done: false, usage: None });
+                                                match delta.type_.as_str() {
+                                                    "text_delta" if !delta.text.is_empty() => {
+                                                        yield Ok(StreamEvent { tool_calls: None, delta: delta.text.clone(), done: false, usage: None });
+                                                    }
+                                                    "input_json_delta" => {
+                                                        // Accumulate partial JSON for tool_use arguments
+                                                        if let Some(ref partial) = delta.partial_json {
+                                                            if let Some(tc) = tool_blocks.get_mut(&chunk.index) {
+                                                                tc.arguments.push_str(partial);
+                                                            }
+                                                        }
+                                                    }
+                                                    _ => {}
                                                 }
                                             }
                                         }
                                         "message_stop" => {
-                                            yield Ok(StreamEvent { tool_calls: None, delta: String::new(), done: true, usage: usage.clone() });
+                                            let tool_calls = if !tool_blocks.is_empty() {
+                                                let mut calls: Vec<(u32, ToolCall)> = tool_blocks.drain().collect();
+                                                calls.sort_by_key(|(idx, _)| *idx);
+                                                Some(calls.into_iter().map(|(_, tc)| tc).collect())
+                                            } else {
+                                                None
+                                            };
+                                            yield Ok(StreamEvent { tool_calls, delta: String::new(), done: true, usage: usage.clone() });
                                             return;
                                         }
-                                        _ => {} // message_delta, content_block_start, etc.
+                                        _ => {} // message_delta, content_block_stop, ping, etc.
                                     }
                                 }
                                 Err(e) => {
@@ -666,7 +1011,7 @@ impl Client for AnthropicClient {
         })
     }
 
-    async fn chat_stream_raw(&self, messages: &[Message], model: &str) -> Result<reqwest::Response> {
+    async fn chat_stream_raw(&self, messages: &[Message], model: &str, tools: Option<&[ToolDefinition]>) -> Result<reqwest::Response> {
         let url = format!("{}/v1/messages", self.config.api_base.trim_end_matches('/'));
 
         let normalized_messages = normalize_outbound_messages(messages);
@@ -677,12 +1022,14 @@ impl Client for AnthropicClient {
         let system_content = system.first().and_then(|m| m.get_content().map(|s| s.to_string()));
         let messages: Vec<_> = others.into_iter().cloned().collect();
 
+        let tools_request = tools.map(|t| t.iter().map(|tool| tool.to_anthropic()).collect());
         let request = AnthropicMessageRequest {
             model: model.to_string(),
             messages,
             system: system_content,
             max_tokens: self.config.max_tokens(),
             stream: Some(true),
+            tools: tools_request,
         };
 
         let response = self
@@ -720,6 +1067,23 @@ struct ChatRequest {
     model: String,
     messages: Vec<Message>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<OpenAIToolDefinition>>,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAIToolDefinition {
+    #[serde(rename = "type")]
+    tool_type: String,
+    #[serde(rename = "function")]
+    function: OpenAIFunctionDefinition,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAIFunctionDefinition {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -735,7 +1099,24 @@ struct ChatChoice {
 
 #[derive(Debug, Deserialize)]
 struct ChatMessage {
+    #[serde(default)]
     content: String,
+    #[serde(default)]
+    tool_calls: Vec<OpenAIToolCall>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    tool_type: String,
+    function: OpenAIFunction,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIFunction {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -761,7 +1142,32 @@ struct ChatStreamChoice {
 
 #[derive(Debug, Deserialize)]
 struct ChatStreamDelta {
+    #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ChatStreamToolCall>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatStreamToolCall {
+    index: i32,
+    #[serde(rename = "id")]
+    #[serde(default)]
+    tool_id: Option<String>,
+    #[serde(rename = "type")]
+    #[serde(default)]
+    tool_type: Option<String>,
+    function: Option<ChatStreamFunctionCall>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatStreamFunctionCall {
+    #[serde(rename = "name")]
+    #[serde(default)]
+    function_name: Option<String>,
+    #[serde(rename = "arguments")]
+    #[serde(default)]
+    function_arguments: Option<String>,
 }
 
 // Anthropic types
@@ -774,17 +1180,36 @@ struct AnthropicMessageRequest {
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<AnthropicToolDefinition>>,
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicToolDefinition {
+    name: String,
+    description: String,
+    input_schema: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
 struct AnthropicMessageResponse {
     content: Vec<AnthropicContentBlock>,
     usage: AnthropicUsage,
+    #[serde(default)]
+    stop_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct AnthropicContentBlock {
-    text: String,
+#[serde(tag = "type")]
+enum AnthropicContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -807,6 +1232,9 @@ struct AnthropicStreamChunk {
     message: Option<AnthropicStreamMessage>,
     #[serde(default, rename = "usage")]
     usage_info: Option<AnthropicStreamUsage>,
+    /// Content block for content_block_start events
+    #[serde(default)]
+    content_block: Option<AnthropicStreamContentBlock>,
 }
 
 // Union type for different delta formats
@@ -829,7 +1257,29 @@ struct AnthropicMessageDelta {
 struct AnthropicDelta {
     #[serde(rename = "type")]
     type_: String,
+    #[serde(default)]
     text: String,
+    /// Partial JSON for input_json_delta events (tool_use arguments)
+    #[serde(default)]
+    partial_json: Option<String>,
+}
+
+/// Content block metadata from content_block_start events
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum AnthropicStreamContentBlock {
+    #[serde(rename = "text")]
+    Text {
+        #[serde(default)]
+        text: String,
+    },
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        #[serde(default)]
+        input: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Deserialize)]

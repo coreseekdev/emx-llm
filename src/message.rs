@@ -43,7 +43,10 @@ impl MessageRole {
 }
 
 /// A single tool call
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Serializes in OpenAI-compatible format:
+/// `{ "id": "...", "type": "function", "function": { "name": "...", "arguments": "..." } }`
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCall {
     /// Tool call ID (for OpenAI compatibility)
     pub id: String,
@@ -53,9 +56,75 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
-/// Content variants for a message
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
+mod tool_call_serde {
+    use super::*;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    struct ToolCallHelper {
+        id: String,
+        #[serde(rename = "type", default)]
+        tool_type: Option<String>,
+        #[serde(default)]
+        function: Option<ToolCallFunction>,
+        // Flat format fallback fields
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        arguments: Option<String>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct ToolCallFunction {
+        name: String,
+        arguments: String,
+    }
+
+    impl Serialize for ToolCall {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            let helper = ToolCallHelper {
+                id: self.id.clone(),
+                tool_type: Some("function".to_string()),
+                function: Some(ToolCallFunction {
+                    name: self.name.clone(),
+                    arguments: self.arguments.clone(),
+                }),
+                name: None,
+                arguments: None,
+            };
+            helper.serialize(serializer)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for ToolCall {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let helper = ToolCallHelper::deserialize(deserializer)?;
+            // Support both nested (OpenAI) and flat formats
+            if let Some(func) = helper.function {
+                Ok(ToolCall {
+                    id: helper.id,
+                    name: func.name,
+                    arguments: func.arguments,
+                })
+            } else {
+                Ok(ToolCall {
+                    id: helper.id,
+                    name: helper.name.unwrap_or_default(),
+                    arguments: helper.arguments.unwrap_or_default(),
+                })
+            }
+        }
+    }
+}
+
+/// Content variants for a message (internal representation)
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageContent {
     /// Plain text content
     Text(String),
@@ -89,22 +158,74 @@ impl From<&str> for MessageContent {
 }
 
 /// A chat message
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     /// Role of the message sender
     pub role: MessageRole,
 
-    /// Content of the message
-    #[serde(flatten)]
+    /// Content of the message (internal representation)
     pub content: MessageContent,
 
     /// Tool call ID (for tool response messages)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
 
     /// Tool calls (when assistant requests tool execution)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+}
+
+// Serialization support for Message
+mod message_serde {
+    use super::*;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    struct MessageHelper {
+        role: MessageRole,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_calls: Option<Vec<ToolCall>>,
+    }
+
+    impl Serialize for Message {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            let helper = MessageHelper {
+                role: self.role.clone(),
+                content: self.get_content().map(|s| s.to_string()),
+                tool_call_id: self.tool_call_id.clone(),
+                tool_calls: self.tool_calls.clone(),
+            };
+            helper.serialize(serializer)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for Message {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let helper = MessageHelper::deserialize(deserializer)?;
+
+            // Determine content type
+            let content = if let Some(ref calls) = helper.tool_calls {
+                MessageContent::ToolCalls(calls.clone())
+            } else {
+                MessageContent::Text(helper.content.unwrap_or_default())
+            };
+
+            Ok(Message {
+                role: helper.role,
+                content,
+                tool_call_id: helper.tool_call_id,
+                tool_calls: helper.tool_calls,
+            })
+        }
+    }
 }
 
 impl Message {

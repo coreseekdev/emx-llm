@@ -34,9 +34,9 @@ pub enum Error {
     Config(String),
 }
 
-pub use client::{Client, StreamEvent};
+pub use client::{Client, StreamEvent, ToolDefinition, load_tools_from_dir};
 pub use config::{load_with_default, ModelConfig, ModelReference, ProviderConfig, ProviderType};
-pub use message::{Message, MessageRole, ToolCall, Usage};
+pub use message::{Message, MessageContent, MessageRole, ToolCall, Usage};
 pub use provider::{create_client, create_client_for_model};
 #[cfg(feature = "cli")]
 pub use session::{FromInfo, Session};
