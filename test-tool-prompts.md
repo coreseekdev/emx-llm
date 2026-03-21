@@ -129,6 +129,26 @@ cargo run --release --features cli --bin emx-llm -- chat -m anthropic.glm.glm-5 
 # 场景 6: 复杂多轮
 cargo run --release --features cli --bin emx-llm -- chat -m anthropic.glm.glm-5 test6 "请分析当前项目的 Rust 源代码结构：1. 首先找出所有 .rs 文件 2. 读取 src/lib.rs 的内容 3. 检查是否使用了 async/await 4. 列出主要依赖的外部 crate。给我一个简洁的总结。" --tools tools
 
+## OpenAI 兼容模式测试
+
+# 场景 1: 单个工具调用 (OpenAI)
+cargo run --release --features cli --bin emx-llm -- chat -m openai.glm.glm-5 oai-test1 "请读取当前目录下的 Cargo.toml 文件的内容，并告诉我项目的名称。" --tools tools
+
+# 场景 2: 多个工具调用 (OpenAI)
+cargo run --release --features cli --bin emx-llm -- chat -m openai.glm.glm-5 oai-test2 "请同时帮我做以下事情：1. 读取 src/lib.rs 文件的内容 2. 列出所有 .rs 文件。然后告诉我有多少个 Rust 源文件，以及 lib.rs 的前 50 个字符。" --tools tools
+
+# 场景 3: 串行工具调用 (OpenAI)
+cargo run --release --features cli --bin emx-llm -- chat -m openai.glm.glm-5 oai-test3 "请列出所有 .md 文件，然后读取第一个 markdown 文件的内容，告诉我它的标题是什么。" --tools tools
+
+# 场景 4: 无工具调用 (OpenAI)
+cargo run --release --features cli --bin emx-llm -- chat -m openai.glm.glm-5 oai-test4 "请用一句话解释什么是 Rust 编程语言。" --tools tools
+
+# 场景 5: 错误处理 (OpenAI)
+cargo run --release --features cli --bin emx-llm -- chat -m openai.glm.glm-5 oai-test5 "请读取一个名为 nonexistent.txt 的文件，然后告诉我文件内容。" --tools tools
+
+# 场景 6: 复杂多轮 (OpenAI)
+cargo run --release --features cli --bin emx-llm -- chat -m openai.glm.glm-5 oai-test6 "请分析当前项目的 Rust 源代码结构：1. 首先找出所有 .rs 文件 2. 读取 src/lib.rs 的内容 3. 检查是否使用了 async/await 4. 列出主要依赖的外部 crate。给我一个简洁的总结。" --tools tools
+
 # 启用原始输出模式查看工具结果
 cargo run --release --features cli --bin emx-llm -- chat -m anthropic.glm.glm-5 test1 "请读取 Cargo.toml" --tools tools --raw
 

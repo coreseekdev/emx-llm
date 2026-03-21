@@ -383,10 +383,11 @@ impl Client for OpenAIClient {
         );
 
         let normalized_messages = normalize_outbound_messages(messages);
+        let openai_messages = messages_to_openai(&normalized_messages);
         let tools_request = tools.map(|t| t.iter().map(|tool| tool.to_openai()).collect());
         let request = ChatRequest {
             model: model.to_string(),
-            messages: normalized_messages,
+            messages: openai_messages,
             stream: false,
             tools: tools_request,
         };
@@ -461,10 +462,11 @@ impl Client for OpenAIClient {
             self.config.api_base.trim_end_matches('/')
         );
         let normalized_messages = normalize_outbound_messages(messages);
+        let openai_messages = messages_to_openai(&normalized_messages);
         let tools_request = tools.map(|t| t.iter().map(|tool| tool.to_openai()).collect());
         let request = ChatRequest {
             model: model.to_string(),
-            messages: normalized_messages,
+            messages: openai_messages,
             stream: false,
             tools: tools_request,
         };
@@ -497,10 +499,11 @@ impl Client for OpenAIClient {
             self.config.api_base.trim_end_matches('/')
         );
         let normalized_messages = normalize_outbound_messages(messages);
+        let openai_messages = messages_to_openai(&normalized_messages);
         let tools_request = tools.map(|t| t.iter().map(|tool| tool.to_openai()).collect());
         let request = ChatRequest {
             model: model.to_string(),
-            messages: normalized_messages,
+            messages: openai_messages,
             stream: true,
             tools: tools_request,
         };
@@ -657,10 +660,11 @@ impl Client for OpenAIClient {
             self.config.api_base.trim_end_matches('/')
         );
         let normalized_messages = normalize_outbound_messages(messages);
+        let openai_messages = messages_to_openai(&normalized_messages);
         let tools_request = tools.map(|t| t.iter().map(|tool| tool.to_openai()).collect());
         let request = ChatRequest {
             model: model.to_string(),
-            messages: normalized_messages,
+            messages: openai_messages,
             stream: true,
             tools: tools_request,
         };
@@ -1060,12 +1064,73 @@ impl Client for AnthropicClient {
     }
 }
 
+// ---------------------------------------------------------------------------
+// OpenAI message format conversion
+// ---------------------------------------------------------------------------
+
+/// Convert internal messages to OpenAI API message format.
+///
+/// OpenAI uses different JSON shapes from Anthropic:
+/// - Tool results: `{"role": "tool", "tool_call_id": "...", "content": "..."}`
+/// - Assistant tool calls: `{"role": "assistant", "tool_calls": [{...}]}`
+fn messages_to_openai(messages: &[Message]) -> Vec<serde_json::Value> {
+    messages.iter().map(|msg| {
+        // Tool result message → OpenAI tool role
+        if msg.role == crate::MessageRole::Tool {
+            if let Some(ref tool_call_id) = msg.tool_call_id {
+                return json!({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": msg.get_content().unwrap_or_default()
+                });
+            }
+            // Legacy tool message without ID → convert to user message
+            return json!({
+                "role": "user",
+                "content": format!("[Tool Output]\n{}", msg.get_content().unwrap_or_default())
+            });
+        }
+
+        // Assistant with tool calls → OpenAI function-call format
+        if msg.role == crate::MessageRole::Assistant {
+            if let Some(ref calls) = msg.tool_calls {
+                let tool_calls: Vec<serde_json::Value> = calls.iter().map(|tc| {
+                    json!({
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": tc.arguments
+                        }
+                    })
+                }).collect();
+                return json!({
+                    "role": "assistant",
+                    "tool_calls": tool_calls
+                });
+            }
+        }
+
+        // Default: simple role + content
+        let role_str = match msg.role {
+            crate::MessageRole::System => "system",
+            crate::MessageRole::User => "user",
+            crate::MessageRole::Assistant => "assistant",
+            crate::MessageRole::Tool => "user", // fallback
+        };
+        json!({
+            "role": role_str,
+            "content": msg.get_content().unwrap_or_default()
+        })
+    }).collect()
+}
+
 // OpenAI types
 
 #[derive(Debug, Serialize)]
 struct ChatRequest {
     model: String,
-    messages: Vec<Message>,
+    messages: Vec<serde_json::Value>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<OpenAIToolDefinition>>,
