@@ -177,6 +177,18 @@ pub struct Message {
 mod message_serde {
     use super::*;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde::ser::SerializeMap;
+    use serde_json::Value;
+
+    /// Content block for Anthropic-style tool results
+    #[derive(Serialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum AnthropicContentBlock {
+        #[serde(rename = "tool_result")]
+        ToolResult { tool_use_id: String, content: String },
+        #[serde(rename = "tool_use")]
+        ToolUse { id: String, name: String, input: Value },
+    }
 
     #[derive(Serialize, Deserialize)]
     struct MessageHelper {
@@ -194,6 +206,41 @@ mod message_serde {
         where
             S: Serializer,
         {
+            // For tool results, use Anthropic-style content block format
+            if self.role == MessageRole::Tool {
+                if let (Some(tool_call_id), Some(content_text)) = (&self.tool_call_id, self.get_content()) {
+                    let mut map = serializer.serialize_map(Some(2))?;
+                    map.serialize_entry("role", "user")?;
+                    let blocks = vec![AnthropicContentBlock::ToolResult {
+                        tool_use_id: tool_call_id.clone(),
+                        content: content_text.to_string(),
+                    }];
+                    map.serialize_entry("content", &blocks)?;
+                    return map.end();
+                }
+            }
+
+            // For assistant with tool calls, use Anthropic-style content block format
+            if self.role == MessageRole::Assistant {
+                if let Some(ref calls) = self.tool_calls {
+                    let mut map = serializer.serialize_map(Some(2))?;
+                    map.serialize_entry("role", "assistant")?;
+                    let mut blocks = Vec::new();
+                    for call in calls {
+                        let input: Value = serde_json::from_str(&call.arguments)
+                            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+                        blocks.push(AnthropicContentBlock::ToolUse {
+                            id: call.id.clone(),
+                            name: call.name.clone(),
+                            input,
+                        });
+                    }
+                    map.serialize_entry("content", &blocks)?;
+                    return map.end();
+                }
+            }
+
+            // Default serialization for other message types
             let helper = MessageHelper {
                 role: self.role.clone(),
                 content: self.get_content().map(|s| s.to_string()),

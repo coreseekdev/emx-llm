@@ -1106,6 +1106,7 @@ struct ChatMessage {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OpenAIToolCall {
     id: String,
     #[serde(rename = "type")]
@@ -1149,6 +1150,7 @@ struct ChatStreamDelta {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ChatStreamToolCall {
     index: i32,
     #[serde(rename = "id")]
@@ -1192,6 +1194,7 @@ struct AnthropicToolDefinition {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct AnthropicMessageResponse {
     content: Vec<AnthropicContentBlock>,
     usage: AnthropicUsage,
@@ -1267,10 +1270,12 @@ struct AnthropicDelta {
 /// Content block metadata from content_block_start events
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
+#[allow(dead_code)]
 enum AnthropicStreamContentBlock {
     #[serde(rename = "text")]
     Text {
         #[serde(default)]
+        #[allow(dead_code)]
         text: String,
     },
     #[serde(rename = "tool_use")]
@@ -1278,6 +1283,7 @@ enum AnthropicStreamContentBlock {
         id: String,
         name: String,
         #[serde(default)]
+        #[allow(dead_code)]
         input: serde_json::Value,
     },
 }

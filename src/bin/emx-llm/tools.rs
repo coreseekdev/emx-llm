@@ -146,14 +146,16 @@ fn parse_tcl_bool(s: &str) -> Option<bool> {
 
 /// Parse named arguments (e.g., --pattern "*.rs" --path "src/")
 /// and convert them to positional arguments based on tool parameter definitions.
+/// Also supports positional arguments mapped to parameters in definition order.
 fn parse_named_args(tool_name: &str, raw_args: &[String], tools_dir: Option<&str>) -> Result<Vec<String>> {
     let tool_info = get_tool_info(tool_name, tools_dir)?;
 
     // Build parameter order from tool info (preserves insertion order with IndexMap)
     let param_order: Vec<String> = tool_info.parameters.keys().cloned().collect();
 
-    // Parse raw args into key-value pairs
+    // Parse raw args into key-value pairs and collect positional args
     let mut parsed_args: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut positional_values: Vec<String> = Vec::new();
     let mut i = 0;
     while i < raw_args.len() {
         let arg = &raw_args[i];
@@ -167,21 +169,24 @@ fn parse_named_args(tool_name: &str, raw_args: &[String], tools_dir: Option<&str
                 i += 1;
             }
         } else {
-            // Positional argument - use in order
+            positional_values.push(arg.clone());
             i += 1;
         }
     }
 
     // Convert to positional args in the order defined by tool info
     let mut positional_args: Vec<String> = Vec::new();
+    let mut pos_idx = 0;
     for param_name in &param_order {
         if let Some(value) = parsed_args.get(param_name) {
             positional_args.push(value.clone());
+        } else if pos_idx < positional_values.len() {
+            positional_args.push(positional_values[pos_idx].clone());
+            pos_idx += 1;
         } else if let Some(param_info) = tool_info.parameters.get(param_name) {
             if param_info.required {
                 anyhow::bail!("Missing required parameter: --{}", param_name);
             }
-            // Optional parameter not provided - skip
         }
     }
 
@@ -202,7 +207,7 @@ pub fn call_tool(tool_name: &str, params: &[String], tools_dir: Option<&str>) ->
         .map_err(tcl_err)
         .with_context(|| format!("Failed to load tool script: {}", script_path.display()))?;
 
-    let mut cmd = format!("execute");
+    let mut cmd = String::from("execute");
     for param in params {
         cmd.push_str(&format!(" {}", quote_tcl_arg(param)));
     }
@@ -227,6 +232,35 @@ pub fn call_tool(tool_name: &str, params: &[String], tools_dir: Option<&str>) ->
             Ok(result.as_str().to_string())
         }
     }
+}
+
+/// Call a tool with JSON arguments (used by LLM tool call execution)
+///
+/// Converts JSON object keys to positional arguments based on tool parameter order.
+pub fn call_tool_json(tool_name: &str, args_json: &serde_json::Value, tools_dir: Option<&str>) -> Result<String> {
+    let tool_info = get_tool_info(tool_name, tools_dir)?;
+
+    let positional_args = if let Some(obj) = args_json.as_object() {
+        let mut positional = Vec::new();
+        for (param_name, param_info) in &tool_info.parameters {
+            if let Some(value) = obj.get(param_name) {
+                let value_str = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    _ => serde_json::to_string(value)?,
+                };
+                positional.push(value_str);
+            } else if param_info.required {
+                anyhow::bail!("Missing required parameter: {}", param_name);
+            }
+        }
+        positional
+    } else {
+        Vec::new()
+    };
+
+    call_tool(tool_name, &positional_args, tools_dir)
 }
 
 /// Get tools directory path
@@ -276,8 +310,8 @@ pub fn run(
                 }
             }
         }
-        // Show tool info
-        (Some(name), _, true) => {
+        // Show tool info (no params, or --info flag forces info display)
+        (Some(name), true, _) | (Some(name), _, true) => {
             let tool_info = get_tool_info(name, None)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&tool_info)?);
@@ -286,7 +320,7 @@ pub fn run(
             }
         }
         // Call tool
-        (Some(name), _, false) => {
+        (Some(name), false, false) => {
             let positional_args = parse_named_args(name, tool_params, None)?;
             let result = call_tool(name, &positional_args, None)?;
             println!("{}", result);

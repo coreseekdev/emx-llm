@@ -11,38 +11,6 @@ use futures::StreamExt;
 /// Run the chat command
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
-    session: String,
-    prompt: Option<String>,
-    model: Option<String>,
-    api_base: Option<String>,
-    stream: bool,
-    no_stream: bool,
-    system: Option<String>,
-    dry_run: bool,
-    token_stats: bool,
-    attach: Vec<PathBuf>,
-    tools_dir: Option<PathBuf>,
-    raw: bool,
-) -> Result<()> {
-    run_async(
-        session,
-        prompt,
-        model,
-        api_base,
-        stream,
-        no_stream,
-        system,
-        dry_run,
-        token_stats,
-        attach,
-        tools_dir,
-        raw,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_async(
     session_name: String,
     prompt: Option<String>,
     model: Option<String>,
@@ -106,78 +74,25 @@ async fn run_async(
     if use_stream {
         let started = Instant::now();
         let tools_ref = if tools.is_empty() { None } else { Some(tools.as_slice()) };
-        let mut response_stream = client.chat_stream(&messages, &model_id, tools_ref);
-        let mut full_response = String::new();
-        let mut final_usage: Option<Usage> = None;
-        let mut final_tool_calls: Option<Vec<ToolCall>> = None;
+        let mut total_usage = Usage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+        let mut current_messages = messages;
 
-        while let Some(event) = response_stream.next().await {
-            match event {
-                Ok(event) => {
-                    print!("{}", event.delta);
-                    io::stdout().flush()?;
+        const MAX_TOOL_ROUNDS: usize = 10;
+        for _round in 0..MAX_TOOL_ROUNDS {
+            let mut response_stream = client.chat_stream(&current_messages, &model_id, tools_ref);
+            let mut full_response = String::new();
+            let mut round_usage: Option<Usage> = None;
+            let mut round_tool_calls: Option<Vec<ToolCall>> = None;
 
-                    full_response.push_str(&event.delta);
-
-                    if event.done {
-                        final_usage = event.usage;
-                        final_tool_calls = event.tool_calls;
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Stream error: {}", e);
-                    break;
-                }
-            }
-        }
-
-        let usage = final_usage.unwrap_or(Usage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-        });
-
-        // Handle tool calls from streaming response
-        if let Some(calls) = final_tool_calls {
-            println!("\n[Tool Calls: {}]", calls.len());
-            for (i, call) in calls.iter().enumerate() {
-                println!("  [{}] {}: {}", i + 1, call.name, call.arguments);
-            }
-
-            // Save assistant tool calls to session
-            session.add_assistant_tool_calls(
-                calls.clone(),
-                &model_id,
-                &usage,
-                Some(started.elapsed().as_millis()),
-            )?;
-
-            // Execute each tool call
-            for call in &calls {
-                let result = execute_tool_call(call, tools_dir.as_ref())?;
-                if raw {
-                    println!("\n[Tool Result: {}]\n{}", call.name, result);
-                } else {
-                    println!("[Executed: {}]", call.name);
-                }
-                session.add_tool_result(call.id.clone(), result)?;
-            }
-
-            // Continue conversation with tool results
-            let follow_up_messages = session.messages().to_vec();
-            let tools_ref = if tools.is_empty() { None } else { Some(tools.as_slice()) };
-            let mut follow_up_stream = client.chat_stream(&follow_up_messages, &model_id, tools_ref);
-            let mut follow_up_response = String::new();
-            let mut follow_up_usage: Option<Usage> = None;
-
-            while let Some(event) = follow_up_stream.next().await {
+            while let Some(event) = response_stream.next().await {
                 match event {
                     Ok(event) => {
                         print!("{}", event.delta);
                         io::stdout().flush()?;
-                        follow_up_response.push_str(&event.delta);
+                        full_response.push_str(&event.delta);
                         if event.done {
-                            follow_up_usage = event.usage;
+                            round_usage = event.usage;
+                            round_tool_calls = event.tool_calls;
                         }
                     }
                     Err(e) => {
@@ -187,104 +102,116 @@ async fn run_async(
                 }
             }
 
-            if !follow_up_response.is_empty() {
-                let fu_usage = follow_up_usage.unwrap_or(Usage {
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    total_tokens: 0,
-                });
-                session.add_assistant_response(
-                    follow_up_response,
+            let usage = round_usage.unwrap_or(Usage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+            });
+            total_usage.prompt_tokens += usage.prompt_tokens;
+            total_usage.completion_tokens += usage.completion_tokens;
+            total_usage.total_tokens += usage.total_tokens;
+
+            if let Some(calls) = round_tool_calls {
+                println!("\n[Tool Calls: {}]", calls.len());
+                for (i, call) in calls.iter().enumerate() {
+                    println!("  [{}] {}: {}", i + 1, call.name, call.arguments);
+                }
+
+                session.add_assistant_tool_calls(
+                    calls.clone(),
                     &model_id,
-                    &fu_usage,
+                    &usage,
                     Some(started.elapsed().as_millis()),
                 )?;
 
-                if token_stats {
-                    println!();
-                    println!("=== Token Stats ===");
-                    println!("Prompt tokens: {}", usage.prompt_tokens + fu_usage.prompt_tokens);
-                    println!("Completion tokens: {}", usage.completion_tokens + fu_usage.completion_tokens);
-                    println!("Total tokens: {}", usage.total_tokens + fu_usage.total_tokens);
-                    println!("Duration (ms): {}", started.elapsed().as_millis());
+                for call in &calls {
+                    let result = match execute_tool_call(call, tools_dir.as_ref()) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            // Return error message to LLM instead of crashing
+                            format!("Error: {}", e)
+                        }
+                    };
+                    if raw {
+                        println!("\n[Tool Result: {}]\n{}", call.name, result);
+                    } else {
+                        println!("[Executed: {}]", call.name);
+                    }
+                    session.add_tool_result(call.id.clone(), result)?;
                 }
+
+                current_messages = session.messages().to_vec();
+                continue; // Next round
             }
-        } else if !full_response.is_empty() {
-            session.add_assistant_response(
-                full_response,
-                &model_id,
-                &usage,
-                Some(started.elapsed().as_millis()),
-            )?;
+
+            // No tool calls — final text response
+            if !full_response.is_empty() {
+                session.add_assistant_response(
+                    full_response,
+                    &model_id,
+                    &usage,
+                    Some(started.elapsed().as_millis()),
+                )?;
+            }
 
             if token_stats {
                 println!();
                 println!("=== Token Stats ===");
-                println!("Prompt tokens: {}", usage.prompt_tokens);
-                println!("Completion tokens: {}", usage.completion_tokens);
-                println!("Total tokens: {}", usage.total_tokens);
+                println!("Prompt tokens: {}", total_usage.prompt_tokens);
+                println!("Completion tokens: {}", total_usage.completion_tokens);
+                println!("Total tokens: {}", total_usage.total_tokens);
                 println!("Duration (ms): {}", started.elapsed().as_millis());
             }
+            break;
         }
     } else {
         // Non-streaming mode with tool call loop
         let started = Instant::now();
         let tools_ref = if tools.is_empty() { None } else { Some(tools.as_slice()) };
-        let (response, tool_calls, usage) = client.chat(&messages, &model_id, tools_ref).await?;
+        let mut total_usage = Usage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+        let mut current_messages = messages;
 
-        // Handle tool calls if present
-        if let Some(calls) = tool_calls {
-            println!("[Tool Calls: {}]", calls.len());
-            for (i, call) in calls.iter().enumerate() {
-                println!("  [{}] {}: {}", i + 1, call.name, call.arguments);
-            }
+        const MAX_TOOL_ROUNDS: usize = 10;
+        for _round in 0..MAX_TOOL_ROUNDS {
+            let (response, tool_calls, usage) = client.chat(&current_messages, &model_id, tools_ref).await?;
+            total_usage.prompt_tokens += usage.prompt_tokens;
+            total_usage.completion_tokens += usage.completion_tokens;
+            total_usage.total_tokens += usage.total_tokens;
 
-            // Add assistant tool calls to session
-            session.add_assistant_tool_calls(
-                calls.clone(),
-                &model_id,
-                &usage,
-                Some(started.elapsed().as_millis()),
-            )?;
-
-            // Execute each tool call
-            for call in &calls {
-                let result = execute_tool_call(call, tools_dir.as_ref())?;
-
-                // Show tool result (if --raw, show raw output)
-                if raw {
-                    println!("\n[Tool Result: {}]\n{}", call.name, result);
-                } else {
-                    println!("[Executed: {}]", call.name);
+            if let Some(calls) = tool_calls {
+                println!("[Tool Calls: {}]", calls.len());
+                for (i, call) in calls.iter().enumerate() {
+                    println!("  [{}] {}: {}", i + 1, call.name, call.arguments);
                 }
 
-                // Add tool result to session
-                session.add_tool_result(call.id.clone(), result)?;
+                session.add_assistant_tool_calls(
+                    calls.clone(),
+                    &model_id,
+                    &usage,
+                    Some(started.elapsed().as_millis()),
+                )?;
+
+                for call in &calls {
+                    let result = match execute_tool_call(call, tools_dir.as_ref()) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            // Return error message to LLM instead of crashing
+                            format!("Error: {}", e)
+                        }
+                    };
+                    if raw {
+                        println!("\n[Tool Result: {}]\n{}", call.name, result);
+                    } else {
+                        println!("[Executed: {}]", call.name);
+                    }
+                    session.add_tool_result(call.id.clone(), result)?;
+                }
+
+                current_messages = session.messages().to_vec();
+                continue; // Next round
             }
 
-            // Continue the conversation with tool results
-            let follow_up_messages = session.messages().to_vec();
-            let tools_ref = if tools.is_empty() { None } else { Some(tools.as_slice()) };
-            let (follow_up, _, follow_up_usage) = client.chat(&follow_up_messages, &model_id, tools_ref).await?;
-            println!("{}", follow_up);
-
-            session.add_assistant_response(
-                follow_up,
-                &model_id,
-                &follow_up_usage,
-                Some(started.elapsed().as_millis()),
-            )?;
-
-            if token_stats {
-                println!();
-                println!("=== Token Stats ===");
-                println!("Prompt tokens: {}", usage.prompt_tokens + follow_up_usage.prompt_tokens);
-                println!("Completion tokens: {}", usage.completion_tokens + follow_up_usage.completion_tokens);
-                println!("Total tokens: {}", usage.total_tokens + follow_up_usage.total_tokens);
-                println!("Duration (ms): {}", started.elapsed().as_millis());
-            }
-        } else {
-            // No tool calls, normal response
+            // No tool calls — final text response
             println!("{}", response);
 
             session.add_assistant_response(
@@ -297,11 +224,12 @@ async fn run_async(
             if token_stats {
                 println!();
                 println!("=== Token Stats ===");
-                println!("Prompt tokens: {}", usage.prompt_tokens);
-                println!("Completion tokens: {}", usage.completion_tokens);
-                println!("Total tokens: {}", usage.total_tokens);
+                println!("Prompt tokens: {}", total_usage.prompt_tokens);
+                println!("Completion tokens: {}", total_usage.completion_tokens);
+                println!("Total tokens: {}", total_usage.total_tokens);
                 println!("Duration (ms): {}", started.elapsed().as_millis());
             }
+            break;
         }
     }
 
@@ -364,70 +292,9 @@ fn resolve_input_value(value: &str) -> Result<String> {
 
 /// Execute tool calls by calling TCL scripts
 fn execute_tool_call(tool_call: &ToolCall, tools_dir: Option<&PathBuf>) -> Result<String> {
-    let tools_dir_path = tools_dir.as_ref().map(|p| p.as_path()).unwrap_or_else(|| {
-        std::path::Path::new("tools")
-    });
-
-    let script_path = tools_dir_path.join(format!("{}.tcl", tool_call.name));
-
-    if !script_path.exists() {
-        return Err(anyhow!("Tool not found: {}", tool_call.name));
-    }
-
-    // Parse arguments from JSON
     let args_json: serde_json::Value = serde_json::from_str(&tool_call.arguments)
         .map_err(|e| anyhow!("Failed to parse tool arguments: {}", e))?;
 
-    // Convert JSON object to positional arguments based on tool info
-    let positional_args = if let Some(obj) = args_json.as_object() {
-        // Get tool info to determine parameter order
-        let tool_info = super::tools::get_tool_info(
-            &tool_call.name,
-            tools_dir.map(|p| p.to_str()).unwrap_or(None)
-        ).map_err(|e| anyhow!("Failed to get tool info: {}", e))?;
-
-        let mut positional = Vec::new();
-        for (param_name, param_info) in &tool_info.parameters {
-            if let Some(value) = obj.get(param_name) {
-                let value_str = match value {
-                    serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Number(n) => n.to_string(),
-                    serde_json::Value::Bool(b) => b.to_string(),
-                    _ => serde_json::to_string(value)?,
-                };
-                positional.push(value_str);
-            } else if param_info.required {
-                return Err(anyhow!("Missing required parameter: {}", param_name));
-            }
-            // Optional parameter not provided - skip
-        }
-        positional
-    } else {
-        // Arguments is not an object, use as-is (array or single value)
-        Vec::new()
-    };
-
-    // Build TCL command
-    let mut cmd = format!("source {{{}}}\n", script_path.display());
-    cmd.push_str("execute");
-    for arg in &positional_args {
-        cmd.push_str(&format!(" {}", quote_tcl_arg(arg)));
-    }
-
-    // Use rtcl to execute
-    use rtcl_core::Interp;
-
-    let mut interp = Interp::new();
-    let result = interp.eval(&cmd)
-        .map_err(|e| anyhow!("Tool execution failed: {}", e))?;
-
-    Ok(result.as_str().to_string())
-}
-
-/// Quote a TCL argument for safe use in commands
-fn quote_tcl_arg(s: &str) -> String {
-    if s.is_empty() || !s.chars().any(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | ';' | '"' | '\\' | '[' | ']' | '$' | '{' | '}')) {
-        return s.to_string();
-    }
-    format!("{{{}}}", s.replace('}', "\\}"))
+    let dir_str = tools_dir.and_then(|p| p.to_str());
+    super::tools::call_tool_json(&tool_call.name, &args_json, dir_str)
 }
