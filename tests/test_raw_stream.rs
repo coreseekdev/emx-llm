@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     println!("=== Calling upstream API (stream mode) ===");
-    let response = client.chat_stream_raw(&messages, &model_id).await?;
+    let response = client.chat_stream_raw(&messages, &model_id, None).await?;
 
     println!("\nStatus: {}", response.status());
     println!("Headers:");
