@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
                 attach,
                 tools,
                 raw,
-            )?;
+            ).await?;
         }
         Commands::Test { provider } => {
             test_cmd::run(provider)?;

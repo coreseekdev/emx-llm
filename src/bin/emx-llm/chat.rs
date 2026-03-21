@@ -5,12 +5,12 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
-use emx_llm::{create_client, create_client_for_model, load_with_default, ProviderConfig, Session, Usage, ToolCall};
+use emx_llm::{create_client, create_client_for_model, load_with_default, load_tools_from_dir, ProviderConfig, Session, Usage, ToolCall};
 use futures::StreamExt;
 
 /// Run the chat command
 #[allow(clippy::too_many_arguments)]
-pub fn run(
+pub async fn run(
     session: String,
     prompt: Option<String>,
     model: Option<String>,
@@ -24,23 +24,21 @@ pub fn run(
     tools_dir: Option<PathBuf>,
     raw: bool,
 ) -> Result<()> {
-    tokio::runtime::Runtime::new()?.block_on(async {
-        run_async(
-            session,
-            prompt,
-            model,
-            api_base,
-            stream,
-            no_stream,
-            system,
-            dry_run,
-            token_stats,
-            attach,
-            tools_dir,
-            raw,
-        )
-        .await
-    })
+    run_async(
+        session,
+        prompt,
+        model,
+        api_base,
+        stream,
+        no_stream,
+        system,
+        dry_run,
+        token_stats,
+        attach,
+        tools_dir,
+        raw,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -99,14 +97,19 @@ async fn run_async(
 
     session.add_user_message(prompt_text, &attach)?;
 
+    // Load tools from tools directory
+    let tools = load_tools_from_dir(tools_dir.as_deref())?;
+
     let messages = session.messages().to_vec();
     let use_stream = stream || !no_stream;
 
     if use_stream {
         let started = Instant::now();
-        let mut response_stream = client.chat_stream(&messages, &model_id);
+        let tools_ref = if tools.is_empty() { None } else { Some(tools.as_slice()) };
+        let mut response_stream = client.chat_stream(&messages, &model_id, tools_ref);
         let mut full_response = String::new();
         let mut final_usage: Option<Usage> = None;
+        let mut final_tool_calls: Option<Vec<ToolCall>> = None;
 
         while let Some(event) = response_stream.next().await {
             match event {
@@ -118,6 +121,7 @@ async fn run_async(
 
                     if event.done {
                         final_usage = event.usage;
+                        final_tool_calls = event.tool_calls;
                     }
                 }
                 Err(e) => {
@@ -127,12 +131,85 @@ async fn run_async(
             }
         }
 
-        if !full_response.is_empty() {
-            let usage = final_usage.unwrap_or(Usage {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0,
-            });
+        let usage = final_usage.unwrap_or(Usage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+        });
+
+        // Handle tool calls from streaming response
+        if let Some(calls) = final_tool_calls {
+            println!("\n[Tool Calls: {}]", calls.len());
+            for (i, call) in calls.iter().enumerate() {
+                println!("  [{}] {}: {}", i + 1, call.name, call.arguments);
+            }
+
+            // Save assistant tool calls to session
+            session.add_assistant_tool_calls(
+                calls.clone(),
+                &model_id,
+                &usage,
+                Some(started.elapsed().as_millis()),
+            )?;
+
+            // Execute each tool call
+            for call in &calls {
+                let result = execute_tool_call(call, tools_dir.as_ref())?;
+                if raw {
+                    println!("\n[Tool Result: {}]\n{}", call.name, result);
+                } else {
+                    println!("[Executed: {}]", call.name);
+                }
+                session.add_tool_result(call.id.clone(), result)?;
+            }
+
+            // Continue conversation with tool results
+            let follow_up_messages = session.messages().to_vec();
+            let tools_ref = if tools.is_empty() { None } else { Some(tools.as_slice()) };
+            let mut follow_up_stream = client.chat_stream(&follow_up_messages, &model_id, tools_ref);
+            let mut follow_up_response = String::new();
+            let mut follow_up_usage: Option<Usage> = None;
+
+            while let Some(event) = follow_up_stream.next().await {
+                match event {
+                    Ok(event) => {
+                        print!("{}", event.delta);
+                        io::stdout().flush()?;
+                        follow_up_response.push_str(&event.delta);
+                        if event.done {
+                            follow_up_usage = event.usage;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Stream error: {}", e);
+                        break;
+                    }
+                }
+            }
+
+            if !follow_up_response.is_empty() {
+                let fu_usage = follow_up_usage.unwrap_or(Usage {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    total_tokens: 0,
+                });
+                session.add_assistant_response(
+                    follow_up_response,
+                    &model_id,
+                    &fu_usage,
+                    Some(started.elapsed().as_millis()),
+                )?;
+
+                if token_stats {
+                    println!();
+                    println!("=== Token Stats ===");
+                    println!("Prompt tokens: {}", usage.prompt_tokens + fu_usage.prompt_tokens);
+                    println!("Completion tokens: {}", usage.completion_tokens + fu_usage.completion_tokens);
+                    println!("Total tokens: {}", usage.total_tokens + fu_usage.total_tokens);
+                    println!("Duration (ms): {}", started.elapsed().as_millis());
+                }
+            }
+        } else if !full_response.is_empty() {
             session.add_assistant_response(
                 full_response,
                 &model_id,
@@ -150,24 +227,81 @@ async fn run_async(
             }
         }
     } else {
+        // Non-streaming mode with tool call loop
         let started = Instant::now();
-        let (response, usage) = client.chat(&messages, &model_id).await?;
-        println!("{}", response);
+        let tools_ref = if tools.is_empty() { None } else { Some(tools.as_slice()) };
+        let (response, tool_calls, usage) = client.chat(&messages, &model_id, tools_ref).await?;
 
-        session.add_assistant_response(
-            response,
-            &model_id,
-            &usage,
-            Some(started.elapsed().as_millis()),
-        )?;
+        // Handle tool calls if present
+        if let Some(calls) = tool_calls {
+            println!("[Tool Calls: {}]", calls.len());
+            for (i, call) in calls.iter().enumerate() {
+                println!("  [{}] {}: {}", i + 1, call.name, call.arguments);
+            }
 
-        if token_stats {
-            println!();
-            println!("=== Token Stats ===");
-            println!("Prompt tokens: {}", usage.prompt_tokens);
-            println!("Completion tokens: {}", usage.completion_tokens);
-            println!("Total tokens: {}", usage.total_tokens);
-            println!("Duration (ms): {}", started.elapsed().as_millis());
+            // Add assistant tool calls to session
+            session.add_assistant_tool_calls(
+                calls.clone(),
+                &model_id,
+                &usage,
+                Some(started.elapsed().as_millis()),
+            )?;
+
+            // Execute each tool call
+            for call in &calls {
+                let result = execute_tool_call(call, tools_dir.as_ref())?;
+
+                // Show tool result (if --raw, show raw output)
+                if raw {
+                    println!("\n[Tool Result: {}]\n{}", call.name, result);
+                } else {
+                    println!("[Executed: {}]", call.name);
+                }
+
+                // Add tool result to session
+                session.add_tool_result(call.id.clone(), result)?;
+            }
+
+            // Continue the conversation with tool results
+            let follow_up_messages = session.messages().to_vec();
+            let tools_ref = if tools.is_empty() { None } else { Some(tools.as_slice()) };
+            let (follow_up, _, follow_up_usage) = client.chat(&follow_up_messages, &model_id, tools_ref).await?;
+            println!("{}", follow_up);
+
+            session.add_assistant_response(
+                follow_up,
+                &model_id,
+                &follow_up_usage,
+                Some(started.elapsed().as_millis()),
+            )?;
+
+            if token_stats {
+                println!();
+                println!("=== Token Stats ===");
+                println!("Prompt tokens: {}", usage.prompt_tokens + follow_up_usage.prompt_tokens);
+                println!("Completion tokens: {}", usage.completion_tokens + follow_up_usage.completion_tokens);
+                println!("Total tokens: {}", usage.total_tokens + follow_up_usage.total_tokens);
+                println!("Duration (ms): {}", started.elapsed().as_millis());
+            }
+        } else {
+            // No tool calls, normal response
+            println!("{}", response);
+
+            session.add_assistant_response(
+                response,
+                &model_id,
+                &usage,
+                Some(started.elapsed().as_millis()),
+            )?;
+
+            if token_stats {
+                println!();
+                println!("=== Token Stats ===");
+                println!("Prompt tokens: {}", usage.prompt_tokens);
+                println!("Completion tokens: {}", usage.completion_tokens);
+                println!("Total tokens: {}", usage.total_tokens);
+                println!("Duration (ms): {}", started.elapsed().as_millis());
+            }
         }
     }
 
@@ -230,11 +364,11 @@ fn resolve_input_value(value: &str) -> Result<String> {
 
 /// Execute tool calls by calling TCL scripts
 fn execute_tool_call(tool_call: &ToolCall, tools_dir: Option<&PathBuf>) -> Result<String> {
-    let tools_dir = tools_dir.as_ref().map(|p| p.as_path()).unwrap_or_else(|| {
+    let tools_dir_path = tools_dir.as_ref().map(|p| p.as_path()).unwrap_or_else(|| {
         std::path::Path::new("tools")
     });
 
-    let script_path = tools_dir.join(format!("{}.tcl", tool_call.name));
+    let script_path = tools_dir_path.join(format!("{}.tcl", tool_call.name));
 
     if !script_path.exists() {
         return Err(anyhow!("Tool not found: {}", tool_call.name));
@@ -244,40 +378,48 @@ fn execute_tool_call(tool_call: &ToolCall, tools_dir: Option<&PathBuf>) -> Resul
     let args_json: serde_json::Value = serde_json::from_str(&tool_call.arguments)
         .map_err(|e| anyhow!("Failed to parse tool arguments: {}", e))?;
 
-    // Convert JSON object to named arguments
-    let mut tcl_args = Vec::new();
-    if let Some(obj) = args_json.as_object() {
-        for (key, value) in obj {
-            let value_str = match value {
-                serde_json::Value::String(s) => s.clone(),
-                serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::Bool(b) => b.to_string(),
-                _ => serde_json::to_string(value)?,
-            };
-            tcl_args.push(format!("--{}", key));
-            tcl_args.push(value_str);
+    // Convert JSON object to positional arguments based on tool info
+    let positional_args = if let Some(obj) = args_json.as_object() {
+        // Get tool info to determine parameter order
+        let tool_info = super::tools::get_tool_info(
+            &tool_call.name,
+            tools_dir.map(|p| p.to_str()).unwrap_or(None)
+        ).map_err(|e| anyhow!("Failed to get tool info: {}", e))?;
+
+        let mut positional = Vec::new();
+        for (param_name, param_info) in &tool_info.parameters {
+            if let Some(value) = obj.get(param_name) {
+                let value_str = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    _ => serde_json::to_string(value)?,
+                };
+                positional.push(value_str);
+            } else if param_info.required {
+                return Err(anyhow!("Missing required parameter: {}", param_name));
+            }
+            // Optional parameter not provided - skip
         }
-    }
+        positional
+    } else {
+        // Arguments is not an object, use as-is (array or single value)
+        Vec::new()
+    };
 
     // Build TCL command
     let mut cmd = format!("source {{{}}}\n", script_path.display());
-    cmd.push_str(&format!("execute"));
-
-    // Convert named args to positional args based on tool info
-    // For now, just pass the args in order they were provided
-    for arg in &tcl_args {
+    cmd.push_str("execute");
+    for arg in &positional_args {
         cmd.push_str(&format!(" {}", quote_tcl_arg(arg)));
     }
 
     // Use rtcl to execute
-    use rtcl_core::{Interp, Value};
+    use rtcl_core::Interp;
 
     let mut interp = Interp::new();
-    interp.eval(&cmd)
+    let result = interp.eval(&cmd)
         .map_err(|e| anyhow!("Tool execution failed: {}", e))?;
-
-    let result = interp.eval("set __result")
-        .map_err(|e| anyhow!("Failed to get tool result: {}", e))?;
 
     Ok(result.as_str().to_string())
 }
